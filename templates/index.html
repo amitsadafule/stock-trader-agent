@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0f0f14">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ZAgent">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+<title>Zerodha Agent</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0f0f14;--surface:#17171f;--surface2:#1e1e2a;--border:#2a2a38;
+  --text:#e8e8f0;--muted:#6b6b80;--green:#22c55e;--red:#ef4444;
+  --amber:#f59e0b;--blue:#3b82f6;--purple:#8b5cf6;
+  --safe-top:env(safe-area-inset-top,0px);--safe-bot:env(safe-area-inset-bottom,0px);
+}
+html,body{height:100%;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',sans-serif;}
+.shell{display:flex;flex-direction:column;height:100%;max-width:480px;margin:0 auto;}
+
+/* Header */
+.header{padding:calc(var(--safe-top) + 12px) 16px 12px;background:var(--surface);
+  border-bottom:1px solid var(--border);display:flex;align-items:center;
+  justify-content:space-between;position:sticky;top:0;z-index:100;}
+.header-logo{width:32px;height:32px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);
+  border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;margin-right:10px;}
+.header-title{font-size:1rem;font-weight:700;}
+.header-sub{font-size:0.68rem;color:var(--muted);margin-top:1px;}
+.pill{display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:0.72rem;font-weight:600;}
+.pill-on{background:rgba(34,197,94,.15);color:var(--green);}
+.pill-off{background:rgba(107,107,128,.15);color:var(--muted);}
+.pill-dot{width:6px;height:6px;border-radius:50%;}
+.pill-on .pill-dot{background:var(--green);box-shadow:0 0 6px var(--green);animation:pulse 2s infinite;}
+.pill-off .pill-dot{background:var(--muted);}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* Tabs */
+.tabs{display:flex;background:var(--surface);border-bottom:1px solid var(--border);}
+.tab{flex:1;padding:10px 4px 8px;text-align:center;font-size:0.68rem;color:var(--muted);
+  cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;user-select:none;}
+.tab .ti{font-size:1.1rem;display:block;margin-bottom:2px;}
+.tab.active{color:var(--blue);border-bottom-color:var(--blue);}
+
+/* Content */
+.content{flex:1;overflow-y:auto;padding:14px;padding-bottom:calc(var(--safe-bot)+14px);}
+.page{display:none;}.page.active{display:block;}
+
+/* Cards */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:10px;}
+.card-title{font-size:0.62rem;text-transform:uppercase;letter-spacing:1.2px;color:var(--muted);margin-bottom:10px;font-weight:600;}
+
+/* Buttons */
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:14px;
+  border-radius:12px;font-size:0.95rem;font-weight:700;border:none;cursor:pointer;
+  text-decoration:none;margin-bottom:8px;transition:opacity .15s,transform .1s;}
+.btn:active{opacity:.8;transform:scale(.98);}
+.btn-login{background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;}
+.btn-start{background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;}
+.btn-stop{background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;}
+.btn-notif{background:var(--surface2);border:1px solid var(--border);color:var(--text);}
+.btn-notif.active{background:rgba(245,158,11,.15);border-color:var(--amber);color:var(--amber);}
+
+/* Market bar */
+.mbar{display:flex;align-items:center;justify-content:center;gap:6px;padding:7px;
+  border-radius:8px;font-size:0.72rem;font-weight:600;margin-bottom:10px;}
+.mbar-open{background:rgba(34,197,94,.1);color:var(--green);}
+.mbar-closed{background:rgba(107,107,128,.1);color:var(--muted);}
+
+/* Stock cards */
+.stock-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+  padding:14px;margin-bottom:10px;transition:border-color .3s;}
+.stock-card.sig-buy{border-color:rgba(34,197,94,.4);}
+.stock-card.sig-sell{border-color:rgba(239,68,68,.4);}
+.stock-card.sig-error{border-color:rgba(239,68,68,.2);}
+.stock-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;}
+.stock-name{font-size:1rem;font-weight:800;}
+.stock-exch{font-size:0.65rem;color:var(--muted);margin-top:1px;}
+.stock-price{font-size:1.2rem;font-weight:800;text-align:right;}
+.stock-updated{font-size:0.62rem;color:var(--muted);text-align:right;margin-top:2px;}
+
+/* Signal badge */
+.sig-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;
+  border-radius:20px;font-size:0.8rem;font-weight:700;margin-bottom:10px;}
+.sig-BUY{background:rgba(34,197,94,.15);color:var(--green);}
+.sig-CATCHUP{background:rgba(34,197,94,.1);color:#4ade80;}
+.sig-SELL{background:rgba(239,68,68,.15);color:var(--red);}
+.sig-HOLD{background:rgba(245,158,11,.1);color:var(--amber);}
+.sig-Market{background:rgba(107,107,128,.1);color:var(--muted);}
+.sig-ERROR{background:rgba(239,68,68,.1);color:#fca5a5;}
+.sig-dash{background:rgba(107,107,128,.1);color:var(--muted);}
+
+/* EMA row */
+.ema-row{display:flex;gap:6px;margin-bottom:6px;}
+.ema-box{flex:1;background:var(--surface2);border-radius:8px;padding:8px 10px;}
+.ema-label{font-size:0.6rem;color:var(--muted);margin-bottom:3px;}
+.ema-val{font-size:0.88rem;font-weight:700;}
+.ema-gap-box{background:var(--surface2);border-radius:8px;padding:8px 10px;min-width:80px;}
+
+/* Holdings row */
+.hold-row{display:flex;gap:6px;margin-top:6px;}
+.hold-box{flex:1;background:var(--surface2);border-radius:8px;padding:8px 10px;}
+.hold-label{font-size:0.6rem;color:var(--muted);margin-bottom:2px;}
+.hold-val{font-size:0.85rem;font-weight:700;}
+
+/* Weight pill */
+.weight-pill{background:rgba(139,92,246,.15);color:var(--purple);border-radius:6px;
+  padding:2px 7px;font-size:0.65rem;font-weight:700;}
+
+/* Summary bar */
+.summary-bar{display:flex;gap:6px;margin-bottom:10px;}
+.sum-box{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px;}
+.sum-label{font-size:0.6rem;color:var(--muted);margin-bottom:3px;}
+.sum-val{font-size:1rem;font-weight:800;}
+
+/* Error/warn banners */
+.banner{border-radius:10px;padding:10px 12px;font-size:0.76rem;margin-bottom:10px;display:flex;gap:8px;align-items:flex-start;}
+.banner-err{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#fca5a5;}
+.banner-dry{background:rgba(245,158,11,.1);border:1.5px solid rgba(245,158,11,.4);color:#f59e0b;}
+.banner-info{background:rgba(139,92,246,.1);border:1.5px solid rgba(139,92,246,.4);color:#a78bfa;}
+
+/* Login */
+.login-wrap{text-align:center;padding:40px 0;}
+.login-icon{font-size:3.5rem;margin-bottom:14px;}
+.login-title{font-size:1.3rem;font-weight:800;margin-bottom:8px;}
+.login-desc{color:var(--muted);font-size:0.83rem;line-height:1.6;margin-bottom:24px;}
+.login-steps{text-align:left;background:var(--surface2);border-radius:12px;padding:14px;margin-bottom:22px;}
+.step{display:flex;gap:10px;margin-bottom:8px;font-size:0.8rem;color:var(--muted);}
+.step:last-child{margin-bottom:0;}
+.step-n{width:20px;height:20px;background:var(--blue);border-radius:50%;display:flex;
+  align-items:center;justify-content:center;font-size:0.62rem;font-weight:700;flex-shrink:0;margin-top:1px;}
+
+/* Transactions */
+.txn-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;}
+.txn-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;}
+.txn-badge{padding:3px 7px;border-radius:5px;font-size:0.68rem;font-weight:700;}
+.tbuy{background:rgba(34,197,94,.15);color:var(--green);}
+.tsell{background:rgba(239,68,68,.15);color:var(--red);}
+.txn-sym{font-size:0.95rem;font-weight:700;margin-left:8px;}
+.txn-time{font-size:0.65rem;color:var(--muted);margin-left:8px;}
+.txn-price{font-size:1rem;font-weight:800;}
+.txn-row{display:flex;justify-content:space-between;font-size:0.72rem;color:var(--muted);margin-top:3px;}
+.txn-reason{font-size:0.7rem;color:var(--muted);margin-top:7px;padding-top:7px;border-top:1px solid var(--border);line-height:1.5;}
+.txn-tax{font-size:0.67rem;color:var(--amber);margin-top:3px;}
+.txn-empty{text-align:center;color:var(--muted);padding:50px 20px;font-size:0.9rem;}
+
+/* Settings */
+.srow{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid var(--border);}
+.srow:last-child{border-bottom:none;}
+.sname{font-size:0.83rem;font-weight:600;}
+.sdesc{font-size:0.68rem;color:var(--muted);margin-top:2px;}
+.sval{font-size:0.82rem;color:var(--blue);font-weight:600;}
+.toggle{width:44px;height:24px;background:var(--border);border-radius:12px;position:relative;cursor:pointer;transition:background .2s;}
+.toggle.on{background:var(--green);}
+.toggle::after{content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;background:#fff;border-radius:50%;transition:transform .2s;}
+.toggle.on::after{transform:translateX(20px);}
+
+/* Install banner */
+.install-banner{background:rgba(59,130,246,.1);border:1px solid rgba(59,130,246,.3);
+  border-radius:10px;padding:12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:8px;}
+
+/* Alloc strategy display */
+.alloc-card{background:var(--surface2);border-radius:10px;padding:10px 12px;margin-bottom:10px;}
+.alloc-title{font-size:0.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;}
+.alloc-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+.alloc-sym{font-size:0.82rem;font-weight:700;}
+.alloc-bar-wrap{flex:1;height:6px;background:var(--border);border-radius:3px;margin:0 10px;}
+.alloc-bar{height:6px;border-radius:3px;background:linear-gradient(90deg,var(--blue),var(--purple));}
+.alloc-pct{font-size:0.72rem;color:var(--muted);min-width:32px;text-align:right;}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Header -->
+  <div class="header">
+    <div style="display:flex;align-items:center;">
+      <div class="header-logo">📈</div>
+      <div>
+        <div class="header-title">Zerodha Agent</div>
+        <div class="header-sub" id="hdr-sub">{{ watchlist|length }} stocks · EMA{{ cfg.ema_green_period }}/{{ cfg.ema_red_period }}</div>
+      </div>
+    </div>
+    <div class="pill {% if state.agent_running %}pill-on{% else %}pill-off{% endif %}" id="status-pill">
+      <span class="pill-dot"></span>
+      <span id="pill-txt">{% if state.agent_running %}Running{% else %}Stopped{% endif %}</span>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('dashboard',this)"><span class="ti">📊</span>Dashboard</div>
+    <div class="tab" onclick="switchTab('stocks',this)"><span class="ti">📋</span>Stocks</div>
+    <div class="tab" onclick="switchTab('trades',this)"><span class="ti">🔁</span>Trades</div>
+    <div class="tab" onclick="switchTab('settings',this)"><span class="ti">⚙️</span>Settings</div>
+  </div>
+
+  <div class="content">
+
+    <!-- ══════ DASHBOARD ══════ -->
+    <div id="page-dashboard" class="page active">
+      {% if not state.logged_in %}
+      <div class="login-wrap">
+        <div class="login-icon">🔐</div>
+        <div class="login-title">Login Required</div>
+        <div class="login-desc">Connect your Zerodha account to start automated trading.</div>
+        <div class="login-steps">
+          <div class="step"><div class="step-n">1</div><div>Tap the button below to open Zerodha's login page</div></div>
+          <div class="step"><div class="step-n">2</div><div>Enter your credentials + TOTP / OTP</div></div>
+          <div class="step"><div class="step-n">3</div><div>You'll be brought back here automatically</div></div>
+        </div>
+        <a href="/login" class="btn btn-login">🔑 Login with Zerodha</a>
+        <p style="font-size:0.68rem;color:var(--muted);margin-top:8px;">You'll get a push notification at 8:45 AM if re-login is needed</p>
+      </div>
+
+      {% else %}
+
+      <!-- Install banner -->
+      <div class="install-banner" id="install-banner" style="display:none">
+        <div style="font-size:0.76rem;color:#93c5fd;line-height:1.4;">📱 Add to Home Screen for app experience & push notifications</div>
+        <div style="color:var(--muted);cursor:pointer;font-size:1.1rem;" onclick="this.parentElement.style.display='none'">✕</div>
+      </div>
+
+      {% if state.dry_run %}
+      <div class="banner banner-dry">
+        <span style="font-size:1.2rem">🧪</span>
+        <div>
+          <div style="font-weight:700;margin-bottom:2px;">DRY RUN — No real orders placed</div>
+          <div style="font-size:0.7rem;opacity:.8;">Set <code>dry_run: False</code> in config.py to go live</div>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if state.last_error %}
+      <div class="banner banner-err">⚠️ <span>{{ state.last_error }}</span></div>
+      {% endif %}
+
+      <!-- Market status -->
+      <div class="mbar {% if state.market_open %}mbar-open{% else %}mbar-closed{% endif %}" id="mbar">
+        <span>{% if state.market_open %}🟢 Market Open{% else %}🔴 Market Closed{% endif %}</span>
+        <span style="opacity:.4">·</span>
+        <span>NSE 9:15 – 15:30 IST</span>
+        <span style="opacity:.4">·</span>
+        <span id="last-checked">{{ state.last_checked }}</span>
+      </div>
+
+      <!-- Agent control -->
+      <div class="card">
+        <div class="card-title">Agent Control</div>
+        {% if state.agent_running %}
+          <a href="/stop" class="btn btn-stop">⏹ Stop Agent</a>
+        {% else %}
+          <a href="/start" class="btn btn-start">▶ Start Agent</a>
+        {% endif %}
+        {% if push_available %}
+        <button class="btn btn-notif {% if state.notifications_enabled %}active{% endif %}" id="notif-btn" onclick="toggleNotifications()">
+          🔔 {% if state.notifications_enabled %}Notifications On{% else %}Enable Notifications{% endif %}
+        </button>
+        {% endif %}
+      </div>
+
+      <!-- Summary bar -->
+      <div class="summary-bar">
+        <div class="sum-box">
+          <div class="sum-label">Available Cash</div>
+          <div class="sum-val" id="cash-val" style="color:var(--blue);">{{ state.cash }}</div>
+        </div>
+        <div class="sum-box">
+          <div class="sum-label">Stocks Watched</div>
+          <div class="sum-val" style="color:var(--purple);">{{ watchlist|length }}</div>
+        </div>
+        <div class="sum-box">
+          <div class="sum-label">Strategy</div>
+          <div class="sum-val" style="font-size:0.75rem;color:var(--amber);">{{ cfg.multi_buy_strategy }}</div>
+        </div>
+      </div>
+
+      <!-- Live signals overview — one mini-card per stock -->
+      <div class="card">
+        <div class="card-title">Live Signals</div>
+        <div id="signals-overview">
+          {% for s in stocks %}
+          {% set sigkey = s.signal.split('(')[0].replace(' ','') if s.signal != '—' else 'dash' %}
+          <div style="display:flex;justify-content:space-between;align-items:center;
+                      padding:10px;background:var(--surface2);border-radius:10px;margin-bottom:6px;"
+               id="sig-row-{{ s.symbol }}">
+            <div>
+              <div style="font-weight:700;font-size:0.9rem;">{{ s.symbol }}</div>
+              <div style="font-size:0.65rem;color:var(--muted);">w={{ s.weight }}%</div>
+            </div>
+            <div style="text-align:center;">
+              <span class="sig-badge sig-{{ sigkey }}" id="sig-{{ s.symbol }}">
+                {{ '🟢' if 'BUY' in s.signal else '🔴' if 'SELL' in s.signal else '🟡' if 'HOLD' in s.signal else '⚪' }}
+                {{ s.signal }}
+              </span>
+            </div>
+            <div style="text-align:right;">
+              <div style="font-weight:700;" id="price-{{ s.symbol }}">{{ s.price }}</div>
+              <div style="font-size:0.65rem;color:var(--muted);" id="gap-{{ s.symbol }}">{{ s.gap_pct }}</div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- Allocation weights visualisation -->
+      <div class="card">
+        <div class="card-title">Allocation Weights</div>
+        {% set total_w = watchlist|sum(attribute='weight') %}
+        {% for w in watchlist %}
+        <div class="alloc-row">
+          <div class="alloc-sym">{{ w.symbol }}</div>
+          <div class="alloc-bar-wrap"><div class="alloc-bar" style="width:{{ (w.weight / total_w * 100)|int }}%"></div></div>
+          <div class="alloc-pct">{{ (w.weight / total_w * 100)|int }}%</div>
+        </div>
+        {% endfor %}
+        <div style="font-size:0.68rem;color:var(--muted);margin-top:8px;">
+          On multi-BUY: cash split by weight among signalling stocks only
+        </div>
+      </div>
+
+      {% endif %}
+    </div>
+
+    <!-- ══════ STOCKS DETAIL ══════ -->
+    <div id="page-stocks" class="page">
+      {% if not state.logged_in %}
+      <div style="text-align:center;color:var(--muted);padding:60px 20px;">Please login first</div>
+      {% else %}
+      {% for s in stocks %}
+      {% set sigkey = s.signal.split('(')[0].replace(' ','') if s.signal != '—' else 'dash' %}
+      <div class="stock-card sig-{{ sigkey }}" id="card-{{ s.symbol }}">
+        <div class="stock-header">
+          <div>
+            <div class="stock-name">{{ s.symbol }} <span class="weight-pill">w={{ s.weight }}%</span></div>
+            <div class="stock-exch">{{ s.exchange }}</div>
+          </div>
+          <div>
+            <div class="stock-price" id="dp-price-{{ s.symbol }}">{{ s.price }}</div>
+            <div class="stock-updated">Updated {{ state.last_checked }}</div>
+          </div>
+        </div>
+
+        <span class="sig-badge sig-{{ sigkey }}" id="dp-sig-{{ s.symbol }}">
+          {{ '🟢' if 'BUY' in s.signal else '🔴' if 'SELL' in s.signal else '🟡' if 'HOLD' in s.signal else '⚪' }}
+          {{ s.signal }}
+        </span>
+
+        <div class="ema-row">
+          <div class="ema-box">
+            <div class="ema-label">● EMA {{ cfg.ema_green_period }} (Green)</div>
+            <div class="ema-val" style="color:var(--green);" id="dp-eg-{{ s.symbol }}">{{ s.ema_green }}</div>
+          </div>
+          <div class="ema-box">
+            <div class="ema-label">● EMA {{ cfg.ema_red_period }} (Red)</div>
+            <div class="ema-val" style="color:var(--red);" id="dp-er-{{ s.symbol }}">{{ s.ema_red }}</div>
+          </div>
+          <div class="ema-gap-box">
+            <div class="ema-label">Gap</div>
+            <div class="ema-val" id="dp-gap-{{ s.symbol }}">{{ s.gap_pct }}</div>
+          </div>
+        </div>
+
+        <div class="hold-row">
+          <div class="hold-box">
+            <div class="hold-label">Holdings</div>
+            <div class="hold-val" style="color:var(--purple);" id="dp-qty-{{ s.symbol }}">{{ s.holdings_qty }} shares</div>
+          </div>
+          <div class="hold-box">
+            <div class="hold-label">Avg Buy Price</div>
+            <div class="hold-val" id="dp-avg-{{ s.symbol }}">{{ s.avg_price }}</div>
+          </div>
+        </div>
+
+        {% if s.error %}
+        <div style="font-size:0.7rem;color:#fca5a5;margin-top:8px;padding:6px 8px;background:rgba(239,68,68,.1);border-radius:6px;">
+          ⚠️ {{ s.error }}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+      {% endif %}
+    </div>
+
+    <!-- ══════ TRADES ══════ -->
+    <div id="page-trades" class="page">
+      <div id="txn-list"><div class="txn-empty">⏳ Loading…</div></div>
+    </div>
+
+    <!-- ══════ SETTINGS ══════ -->
+    <div id="page-settings" class="page">
+      <div class="card">
+        <div class="card-title">Watchlist ({{ watchlist|length }} stocks)</div>
+        {% for w in watchlist %}
+        <div class="srow">
+          <div><div class="sname">{{ w.symbol }}</div><div class="sdesc">{{ w.exchange }}</div></div>
+          <div class="sval">weight {{ w.weight }}</div>
+        </div>
+        {% endfor %}
+      </div>
+
+      <div class="card">
+        <div class="card-title">EMA Strategy</div>
+        <div class="srow"><div class="sname">Fast EMA (Green)</div><div class="sval">{{ cfg.ema_green_period }}</div></div>
+        <div class="srow"><div class="sname">Slow EMA (Red)</div><div class="sval">{{ cfg.ema_red_period }}</div></div>
+        <div class="srow"><div class="sname">Candle Interval</div><div class="sval">{{ cfg.candle_interval }}</div></div>
+        <div class="srow"><div class="sname">Check Every</div><div class="sval">{{ cfg.check_interval_seconds }}s</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Capital Allocation</div>
+        <div class="srow">
+          <div><div class="sname">Multi-Buy Strategy</div><div class="sdesc">How cash is split on simultaneous signals</div></div>
+          <div class="sval">{{ cfg.multi_buy_strategy }}</div>
+        </div>
+        <div class="srow"><div><div class="sname">Max Invest</div><div class="sdesc">of available cash</div></div><div class="sval">{{ (cfg.max_invest_pct*100)|int }}%</div></div>
+        <div class="srow"><div><div class="sname">Min Cash Reserve</div><div class="sdesc">Always kept aside</div></div><div class="sval">{{ (cfg.min_cash_reserve_pct*100)|int }}%</div></div>
+        <div class="srow"><div class="sname">Min Order Value</div><div class="sval">₹{{ cfg.min_trade_amount }}</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Risk & Tax Rules</div>
+        <div class="srow"><div><div class="sname">Min Holding Days</div><div class="sdesc">Prevents wash trades</div></div><div class="sval">{{ cfg.min_holding_days }}d</div></div>
+        <div class="srow"><div><div class="sname">Min Profit to Sell</div><div class="sdesc">Covers STT + tax</div></div><div class="sval">{{ cfg.min_profit_pct_to_sell }}%</div></div>
+        <div class="srow"><div><div class="sname">Partial Sell Size</div><div class="sdesc">On weak signal</div></div><div class="sval">{{ (cfg.partial_sell_pct*100)|int }}%</div></div>
+        <div class="srow"><div><div class="sname">LTCG Threshold</div></div><div class="sval">{{ cfg.stcg_holding_days }}d</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Notifications</div>
+        <div class="srow">
+          <div><div class="sname">Push Notifications</div><div class="sdesc">Trades + login reminders</div></div>
+          <div class="toggle {% if state.notifications_enabled %}on{% endif %}" id="notif-toggle" onclick="toggleNotifications()"></div>
+        </div>
+        <div class="srow"><div><div class="sname">Morning Reminder</div><div class="sdesc">8:45 AM if re-login needed</div></div><div class="toggle on"></div></div>
+      </div>
+
+      {% if state.logged_in %}
+      <button class="btn" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);" onclick="testPush()">🔔 Send Test Notification</button>
+      {% endif %}
+
+      <p style="font-size:0.68rem;color:var(--muted);text-align:center;margin-top:12px;">
+        Edit config.py and restart app.py to change values
+      </p>
+    </div>
+
+  </div><!-- .content -->
+</div><!-- .shell -->
+
+<script>
+const VAPID_PUBLIC = "{{ vapid_public_key }}";
+
+// ── Service Worker ─────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').then(r => { window._swReg = r; });
+}
+
+// ── Tab switching ──────────────────────────────────────
+function switchTab(name, el) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  el.classList.add('active');
+  if (name === 'trades') loadTrades();
+}
+
+// ── Live status poll ───────────────────────────────────
+// Polls /status every 15s and updates EVERY field in the UI
+async function pollStatus() {
+  try {
+    const d = await (await fetch('/status')).json();
+
+    // Top-level
+    setTxt('cash-val', d.cash || '—');
+    setTxt('last-checked', d.last_checked || '—');
+
+    const running = d.agent_running;
+    const pill = document.getElementById('status-pill');
+    if (pill) {
+      pill.className = 'pill ' + (running ? 'pill-on' : 'pill-off');
+      setTxt('pill-txt', running ? 'Running' : 'Stopped');
+    }
+    const mbar = document.getElementById('mbar');
+    if (mbar) {
+      mbar.className = 'mbar ' + (d.market_open ? 'mbar-open' : 'mbar-closed');
+    }
+
+    // Per-stock updates
+    if (d.stocks) {
+      d.stocks.forEach(s => {
+        const sym    = s.symbol;
+        const sigkey = (s.signal || '—').split('(')[0].replace(/\s/g,'');
+        const icon   = s.signal.includes('BUY') ? '🟢' : s.signal.includes('SELL') ? '🔴' : s.signal.includes('HOLD') ? '🟡' : '⚪';
+        const sigTxt = icon + ' ' + (s.signal || '—');
+
+        // Dashboard signals overview
+        setTxt(`sig-${sym}`, sigTxt);
+        setClass(`sig-${sym}`, `sig-badge sig-${sigkey}`);
+        setTxt(`price-${sym}`, s.price || '—');
+        setTxt(`gap-${sym}`, s.gap_pct || '—');
+
+        // Stocks detail page
+        setTxt(`dp-sig-${sym}`, sigTxt);
+        setClass(`dp-sig-${sym}`, `sig-badge sig-${sigkey}`);
+        setTxt(`dp-price-${sym}`, s.price || '—');
+        setTxt(`dp-eg-${sym}`, s.ema_green || '—');   // ← EMA values now update!
+        setTxt(`dp-er-${sym}`, s.ema_red || '—');     // ← EMA values now update!
+        setTxt(`dp-gap-${sym}`, s.gap_pct || '—');
+        setTxt(`dp-qty-${sym}`, (s.holdings_qty ?? '—') + ' shares');
+        setTxt(`dp-avg-${sym}`, s.avg_price || '—');
+
+        // Card border colour
+        const card = document.getElementById(`card-${sym}`);
+        if (card) {
+          card.className = `stock-card sig-${sigkey}`;
+        }
+      });
+    }
+  } catch(e) { /* network error, ignore */ }
+}
+
+function setTxt(id, val) { const el=document.getElementById(id); if(el) el.textContent=val; }
+function setClass(id, cls) { const el=document.getElementById(id); if(el) el.className=cls; }
+
+setInterval(pollStatus, 15000);
+
+// ── Transactions ───────────────────────────────────────
+async function loadTrades() {
+  const list = document.getElementById('txn-list');
+  try {
+    const rows = await (await fetch('/api/transactions')).json();
+    if (!rows.length) { list.innerHTML='<div class="txn-empty">📭 No transactions yet.</div>'; return; }
+    list.innerHTML = rows.map(r => {
+      const isBuy = r.action.includes('BUY');
+      const dt = new Date(r.timestamp).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'});
+      const total = fmtRs(r.total_value);
+      const cashA = fmtRs(r.available_cash_after);
+      return `<div class="txn-card">
+        <div class="txn-top">
+          <div style="display:flex;align-items:center;">
+            <span class="txn-badge ${isBuy?'tbuy':'tsell'}">${isBuy?'▲ BUY':'▼ SELL'}</span>
+            <div><div class="txn-sym">${r.symbol}</div><div class="txn-time">${dt}</div></div>
+          </div>
+          <div class="txn-price" style="color:${isBuy?'var(--green)':'var(--red)'}">₹${parseFloat(r.price||0).toFixed(2)}</div>
+        </div>
+        <div class="txn-row"><span>${r.quantity} shares</span><span>Total: ${total}</span></div>
+        <div class="txn-row"><span>Cash after: ${cashA}</span><span>Held: ${r.holding_days}d</span></div>
+        ${r.reason?`<div class="txn-reason">${r.reason}</div>`:''}
+        ${r.estimated_tax_note?`<div class="txn-tax">💰 ${r.estimated_tax_note}</div>`:''}
+      </div>`;
+    }).join('');
+  } catch(e) { list.innerHTML='<div class="txn-empty">Failed to load.</div>'; }
+}
+
+function fmtRs(v) {
+  return parseFloat(v||0).toLocaleString('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:0});
+}
+
+// ── Push notifications ─────────────────────────────────
+let _notifOn = {{ 'true' if state.notifications_enabled else 'false' }};
+
+async function toggleNotifications() {
+  _notifOn ? await disableNotifications() : await enableNotifications();
+}
+async function enableNotifications() {
+  if (!VAPID_PUBLIC) { alert('Run generate_vapid.py first'); return; }
+  if (!('Notification' in window)) { alert('Not supported'); return; }
+  if (await Notification.requestPermission() !== 'granted') { alert('Permission denied'); return; }
+  try {
+    const reg = window._swReg || await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:b64ToUint8(VAPID_PUBLIC)});
+    await fetch('/subscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sub.toJSON())});
+    _notifOn=true; updateNotifUI(true);
+  } catch(e) { alert('Failed: '+e.message); }
+}
+async function disableNotifications() {
+  try {
+    const reg = window._swReg || await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) { await fetch('/unsubscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sub.toJSON())}); await sub.unsubscribe(); }
+    _notifOn=false; updateNotifUI(false);
+  } catch(e) {}
+}
+function updateNotifUI(on) {
+  const btn=document.getElementById('notif-btn'), tog=document.getElementById('notif-toggle');
+  if(btn){btn.textContent=on?'🔔 Notifications On':'🔔 Enable Notifications'; btn.classList.toggle('active',on);}
+  if(tog) tog.classList.toggle('on',on);
+}
+async function testPush() {
+  await fetch('/test-push');
+}
+
+// ── Install prompt ─────────────────────────────────────
+let _deferred;
+window.addEventListener('beforeinstallprompt', e=>{
+  e.preventDefault(); _deferred=e;
+  const b=document.getElementById('install-banner');
+  if(b) b.style.display='flex';
+});
+document.getElementById('install-banner')?.addEventListener('click', async e=>{
+  if(e.target.style.cursor==='pointer') return;
+  if(_deferred){_deferred.prompt(); _deferred=null; document.getElementById('install-banner').style.display='none';}
+});
+
+// ── Util ───────────────────────────────────────────────
+function b64ToUint8(b64){
+  const pad='='.repeat((4-b64.length%4)%4);
+  const raw=atob((b64+pad).replace(/-/g,'+').replace(/_/g,'/'));
+  return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
+}
+</script>
+</body>
+</html>
