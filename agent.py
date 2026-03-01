@@ -18,7 +18,6 @@ import datetime
 import traceback
 from pathlib import Path
 
-import pandas as pd
 import requests
 
 try:
@@ -135,7 +134,7 @@ class ZerodhaAgent:
         log.info("✅ Login successful. Token saved.")
 
     # ── MARKET DATA ───────────────────────────
-    def get_candles(self, symbol: str, exchange: str) -> pd.DataFrame:
+    def get_candles(self, symbol: str, exchange: str) -> list:
         interval = self.cfg["candle_interval"]
         lookback = self.cfg["lookback_candles"]
 
@@ -149,11 +148,11 @@ class ZerodhaAgent:
                 to_date=to_date,
                 interval=interval,
             )
-            df = pd.DataFrame(data)
-            df = df.rename(columns={"date": "timestamp"})
-            df = df.sort_values("timestamp").reset_index(drop=True)
-            df = df.tail(lookback)
-            return df
+            rows = [{"timestamp": r["date"], "open": r["open"], "high": r["high"],
+                     "low": r["low"], "close": r["close"], "volume": r.get("volume", 0)}
+                    for r in data]
+            rows.sort(key=lambda r: r["timestamp"])
+            return rows[-lookback:]
         except Exception as e:
             log.error(f"Failed to fetch candles for {symbol}: {e}")
             raise
@@ -206,23 +205,27 @@ class ZerodhaAgent:
 
     # ── EMA CALCULATION ───────────────────────
     @staticmethod
-    def calculate_ema(prices: pd.Series, period: int) -> pd.Series:
-        return prices.ewm(span=period, adjust=False).mean()
+    def calculate_ema(prices: list, period: int) -> list:
+        k = 2.0 / (period + 1)
+        ema = [prices[0]]
+        for price in prices[1:]:
+            ema.append(price * k + ema[-1] * (1 - k))
+        return ema
 
-    def get_signal(self, df: pd.DataFrame):
+    def get_signal(self, candles: list):
         """
         Returns: ('BUY', ema_green, ema_red, gap_pct)
                  ('SELL', ema_green, ema_red, gap_pct)
                  ('HOLD', ema_green, ema_red, gap_pct)
         """
-        close = df["close"]
+        close = [r["close"] for r in candles]
         ema_green = self.calculate_ema(close, self.cfg["ema_green_period"])
         ema_red   = self.calculate_ema(close, self.cfg["ema_red_period"])
 
-        prev_green = ema_green.iloc[-2]
-        prev_red   = ema_red.iloc[-2]
-        curr_green = ema_green.iloc[-1]
-        curr_red   = ema_red.iloc[-1]
+        prev_green = ema_green[-2]
+        prev_red   = ema_red[-2]
+        curr_green = ema_green[-1]
+        curr_red   = ema_red[-1]
 
         gap_pct = abs(curr_green - curr_red) / curr_red * 100
 

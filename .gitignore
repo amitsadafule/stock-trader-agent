@@ -4,6 +4,7 @@ access_token.txt
 agent.log
 vapid_public.txt
 vapid_private.pem
+config.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

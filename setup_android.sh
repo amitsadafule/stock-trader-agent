@@ -72,10 +72,12 @@ ok "All project files present"
 
 # ── Step 3: Python dependencies ───────────────────────────
 step "3/6  Install Python packages"
-# NOTE: `pip install --upgrade pip` is intentionally blocked by Termux
-# (termux#3235) — pip is managed via `pkg upgrade python-pip` instead.
+# pandas dropped — pure Python EMA, no compilation needed.
+# cryptography (pulled by pywebpush) ships as a pre-built pkg — avoids Rust compilation.
+# `pip install --upgrade pip` is intentionally blocked by Termux (termux#3235).
+pkg install -y python-cryptography
 pip install -r requirements.txt
-ok "kiteconnect, flask, pywebpush installed"
+ok "All packages installed"
 
 # ── Step 4: VAPID keys (push notifications) ───────────────
 step "4/6  Push notification keys (VAPID)"

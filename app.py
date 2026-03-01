@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, redirect, request, jsonify, render_template, Response
 from kiteconnect import KiteConnect
-import pandas as pd
 
 try:
     from pywebpush import webpush, WebPushException
@@ -178,7 +177,7 @@ MAX_DAYS = {
     "60minute": 400, "day": 2000,
 }
 
-def get_candles(symbol: str, exchange: str) -> pd.DataFrame:
+def get_candles(symbol: str, exchange: str) -> list:
     cfg       = TRADING_CONFIG
     interval  = cfg["candle_interval"]
     safe_days = min(MAX_DAYS.get(interval, 60) - 2, 58)
@@ -186,20 +185,27 @@ def get_candles(symbol: str, exchange: str) -> pd.DataFrame:
     fr_dt     = to_dt - datetime.timedelta(days=safe_days)
     tok       = get_instrument_token(symbol, exchange)
     data      = kite.historical_data(tok, fr_dt, to_dt, interval)
-    df        = pd.DataFrame(data).rename(columns={"date": "timestamp"})
-    return df.sort_values("timestamp").tail(cfg["lookback_candles"]).reset_index(drop=True)
+    rows = [{"timestamp": r["date"], "open": r["open"], "high": r["high"],
+             "low": r["low"], "close": r["close"], "volume": r.get("volume", 0)}
+            for r in data]
+    rows.sort(key=lambda r: r["timestamp"])
+    return rows[-cfg["lookback_candles"]:]
 
-def calc_ema(prices: pd.Series, period: int) -> pd.Series:
-    return prices.ewm(span=period, adjust=False).mean()
+def calc_ema(prices: list, period: int) -> list:
+    k = 2.0 / (period + 1)
+    ema = [prices[0]]
+    for price in prices[1:]:
+        ema.append(price * k + ema[-1] * (1 - k))
+    return ema
 
-def get_signal(df: pd.DataFrame):
+def get_signal(candles: list):
     """Returns (signal_str, ema_green_val, ema_red_val, gap_pct)"""
     cfg   = TRADING_CONFIG
-    close = df["close"]
+    close = [r["close"] for r in candles]
     eg    = calc_ema(close, cfg["ema_green_period"])
     er    = calc_ema(close, cfg["ema_red_period"])
-    pg, pr = eg.iloc[-2], er.iloc[-2]
-    cg, cr = eg.iloc[-1], er.iloc[-1]
+    pg, pr = eg[-2], er[-2]
+    cg, cr = eg[-1], er[-1]
     gap   = abs(cg - cr) / cr * 100
     if pg <= pr and cg > cr: return "BUY",  cg, cr, gap
     if pg >= pr and cg < cr: return "SELL", cg, cr, gap
