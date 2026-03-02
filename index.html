@@ -189,37 +189,6 @@ html,body{height:100%;background:var(--bg);color:var(--text);
 .intel-box{background:var(--surface2);border-radius:7px;padding:6px 8px;text-align:center;}
 .intel-lbl{font-size:0.58rem;color:var(--muted);margin-bottom:2px;}
 .intel-val{font-size:0.78rem;font-weight:700;}
-
-/* Why box — signal reasoning */
-.why-box{margin-top:10px;padding:10px 12px;border-radius:10px;border-left:3px solid var(--border);}
-.why-box-BUY{background:rgba(34,197,94,.07);border-left-color:var(--green);}
-.why-box-SELL{background:rgba(239,68,68,.07);border-left-color:var(--red);}
-.why-box-HOLD{background:rgba(245,158,11,.06);border-left-color:var(--amber);}
-.why-box-default{background:var(--surface2);border-left-color:var(--border);}
-.why-title{font-size:0.6rem;text-transform:uppercase;letter-spacing:1.1px;color:var(--muted);font-weight:700;margin-bottom:7px;}
-.why-rows{display:flex;flex-direction:column;gap:5px;}
-.why-row{display:flex;align-items:flex-start;gap:8px;font-size:0.75rem;line-height:1.4;}
-.why-icon{flex-shrink:0;font-size:0.85rem;margin-top:1px;}
-.why-text{color:var(--text);}
-.why-text b{font-weight:700;}
-.why-text .pos{color:var(--green);font-weight:700;}
-.why-text .neg{color:var(--red);font-weight:700;}
-.why-text .neu{color:var(--amber);font-weight:700;}
-
-/* Why box */
-.why-box{margin-top:10px;border-radius:10px;padding:10px 12px;border-left:3px solid;}
-.why-box-BUY{background:rgba(34,197,94,.07);border-color:var(--green);}
-.why-box-SELL{background:rgba(239,68,68,.07);border-color:var(--red);}
-.why-box-HOLD{background:rgba(245,158,11,.06);border-color:var(--amber);}
-.why-box-default{background:rgba(107,107,128,.07);border-color:var(--border);}
-.why-title{font-size:0.6rem;text-transform:uppercase;letter-spacing:1px;font-weight:700;margin-bottom:6px;opacity:.7;}
-.why-rows{}
-.why-row{display:flex;align-items:flex-start;gap:7px;margin-bottom:4px;font-size:0.74rem;line-height:1.4;}
-.why-row:last-child{margin-bottom:0;}
-.why-icon{font-size:0.85rem;flex-shrink:0;margin-top:1px;}
-.why-text{color:var(--text);}
-.why-text b{font-weight:700;}
-.why-skip{font-size:0.72rem;color:var(--muted);font-style:italic;margin-top:4px;}
 </style>
 </head>
 <body>
@@ -471,31 +440,6 @@ html,body{height:100%;background:var(--bg);color:var(--text);
           </div>
         </div>
 
-        <!-- Why this signal — JS builds the content dynamically -->
-        {% set wsig = s.signal if s.signal not in ['—',''] else 'default' %}
-        {% set wtype = 'BUY' if 'BUY' in wsig else 'SELL' if 'SELL' in wsig else 'HOLD' if 'HOLD' in wsig else 'default' %}
-        <div class="why-box why-box-{{ wtype }}" id="why-{{ s.symbol }}">
-          <div class="why-title">📋 Why {{ wsig }}</div>
-          <div class="why-rows" id="why-rows-{{ s.symbol }}">
-            {% if s.ema_green not in ['—', ''] and s.ema_red not in ['—', ''] %}
-              {% set eg = s.ema_green|float %}
-              {% set er = s.ema_red|float %}
-              {% if 'BUY' in wsig %}
-              <div class="why-row"><span class="why-icon">✅</span><span class="why-text">EMA{{ cfg.ema_green_period }} <b class="pos">{{ s.ema_green }}</b> crossed <b>above</b> EMA{{ cfg.ema_red_period }} <b>{{ s.ema_red }}</b> — bullish crossover triggered</span></div>
-              {% elif 'SELL' in wsig %}
-              <div class="why-row"><span class="why-icon">🔻</span><span class="why-text">EMA{{ cfg.ema_green_period }} <b class="neg">{{ s.ema_green }}</b> crossed <b>below</b> EMA{{ cfg.ema_red_period }} <b>{{ s.ema_red }}</b> — bearish crossover triggered</span></div>
-              {% elif '↑' in wsig %}
-              <div class="why-row"><span class="why-icon">🟡</span><span class="why-text">EMA{{ cfg.ema_green_period }} <b class="pos">{{ s.ema_green }}</b> is above EMA{{ cfg.ema_red_period }} <b>{{ s.ema_red }}</b> — bullish trend, no fresh crossover yet</span></div>
-              {% elif '↓' in wsig %}
-              <div class="why-row"><span class="why-icon">🟡</span><span class="why-text">EMA{{ cfg.ema_green_period }} <b class="neg">{{ s.ema_green }}</b> is below EMA{{ cfg.ema_red_period }} <b>{{ s.ema_red }}</b> — bearish trend, waiting for reversal</span></div>
-              {% endif %}
-              <div class="why-row"><span class="why-icon">📏</span><span class="why-text">Gap between EMAs is <b>{{ s.gap_pct }}</b>{% if s.gap_change not in ['—',''] %} and is <b class="{{ 'pos' if '+' in s.gap_change|string else 'neg' }}">{{ 'widening ↑' if '+' in s.gap_change|string else 'narrowing ↓' }}</b> ({{ s.gap_change }}/candle){% endif %}</span></div>
-            {% else %}
-              <div class="why-row"><span class="why-icon">⏳</span><span class="why-text">Waiting for first market data…</span></div>
-            {% endif %}
-          </div>
-        </div>
-
         {% if s.error %}
         <div style="font-size:0.7rem;color:#fca5a5;margin-top:8px;padding:6px 8px;background:rgba(239,68,68,.1);border-radius:6px;">
           ⚠️ {{ s.error }}
@@ -658,19 +602,6 @@ async function pollStatus() {
         // Card border colour
         const card = document.getElementById(`card-${sym}`);
         if (card) card.className = `stock-card sig-${sigkey}`;
-
-        // Why-box: update reasoning rows and border colour
-        const whyBox  = document.getElementById(`why-${sym}`);
-        const whyRows = document.getElementById(`why-rows-${sym}`);
-        if (whyBox && whyRows) {
-          const wtype = isBuy ? 'BUY' : s.signal.includes('SELL') ? 'SELL' : 'HOLD';
-          whyBox.className = `why-box why-box-${wtype}`;
-          // Update title
-          const wtitle = whyBox.querySelector('.why-title');
-          const icon = isBuy ? '📋 Why BUY' : s.signal.includes('SELL') ? '📋 Why SELL' : '📋 Why HOLD';
-          if (wtitle) wtitle.textContent = icon;
-          whyRows.innerHTML = buildWhyRows(s);
-        }
       });
     }
   } catch(e) { /* network error, ignore */ }
@@ -680,130 +611,6 @@ function setTxt(id, val) { const el=document.getElementById(id); if(el) el.textC
 function setClass(id, cls) { const el=document.getElementById(id); if(el) el.className=cls; }
 
 setInterval(pollStatus, 15000);
-
-// ── buildWhyRows: generates human-readable signal reasoning ──────────────────
-// Called every poll cycle with live stock data from /status
-function buildWhyRows(s) {
-  const sig   = s.signal || '—';
-  const eg    = parseFloat(s.ema_green) || 0;
-  const er    = parseFloat(s.ema_red)   || 0;
-  const gap   = parseFloat(s.gap_pct)   || 0;
-  const gc    = s.gap_change || '';
-  const trend = s.trend_candles ?? '—';
-  const vol   = s.vol_ratio   || '—';
-  const conv  = s.conviction  ?? '—';
-  const clbl  = s.conviction_label || '—';
-  const ipct  = s.invest_pct || '—';
-  const isBuy  = sig.includes('BUY');
-  const isSell = sig.includes('SELL');
-  const isHoldUp = sig.includes('HOLD') && sig.includes('↑');
-  const isHoldDn = sig.includes('HOLD') && sig.includes('↓');
-
-  if (!eg || !er) {
-    return `<div class="why-row"><span class="why-icon">⏳</span><span class="why-text">Waiting for market data…</span></div>`;
-  }
-
-  const rows = [];
-  const pos = v => `<span class="pos">${v}</span>`;
-  const neg = v => `<span class="neg">${v}</span>`;
-  const neu = v => `<span class="neu">${v}</span>`;
-
-  // ── Row 1: Core EMA crossover explanation ────────────────────────────────
-  if (isBuy) {
-    rows.push(`<div class="why-row"><span class="why-icon">✅</span><span class="why-text">
-      EMA${s.ema_green ? eg.toFixed(2) : '?'} crossed ${pos('above')} EMA${er.toFixed(2)} —
-      fast line (${pos(eg.toFixed(2))}) broke above slow line (${er.toFixed(2)}),
-      signalling a <b>bullish reversal</b>
-    </span></div>`);
-  } else if (isSell) {
-    rows.push(`<div class="why-row"><span class="why-icon">🔻</span><span class="why-text">
-      Fast EMA crossed ${neg('below')} slow EMA —
-      EMA dropped to ${neg(eg.toFixed(2))} below ${er.toFixed(2)},
-      signalling a <b>bearish reversal</b>
-    </span></div>`);
-  } else if (isHoldUp) {
-    rows.push(`<div class="why-row"><span class="why-icon">🟡</span><span class="why-text">
-      Fast EMA (${pos(eg.toFixed(2))}) is ${pos('above')} slow EMA (${er.toFixed(2)}) —
-      bullish trend is ${neu('ongoing')}, no fresh crossover yet
-    </span></div>`);
-  } else if (isHoldDn) {
-    rows.push(`<div class="why-row"><span class="why-icon">🟡</span><span class="why-text">
-      Fast EMA (${neg(eg.toFixed(2))}) is ${neg('below')} slow EMA (${er.toFixed(2)}) —
-      bearish trend ${neu('continues')}, waiting for bullish crossover
-    </span></div>`);
-  }
-
-  // ── Row 2: Gap size and momentum ─────────────────────────────────────────
-  const gcNum   = parseFloat(gc) || 0;
-  const gapWord = gcNum > 0 ? pos('widening ↑') : gcNum < 0 ? neg('narrowing ↓') : neu('stable');
-  rows.push(`<div class="why-row"><span class="why-icon">📏</span><span class="why-text">
-    Gap between EMAs: <b>${gap.toFixed(2)}%</b> and ${gapWord}
-    (${gcNum > 0 ? '+' : ''}${gcNum.toFixed(3)}% this candle) —
-    ${gcNum > 0 ? 'trend is <b>accelerating</b>' : gcNum < 0 ? 'trend may be <b>fading</b>' : 'momentum is <b>flat</b>'}
-  </span></div>`);
-
-  // ── Row 3: Trend age ──────────────────────────────────────────────────────
-  const trendSentence = trend === 1
-    ? 'just this candle — <b>very fresh</b>, high false-signal risk'
-    : trend <= 5
-    ? `<b>${trend} candles</b> — young trend, moderate confidence`
-    : trend <= 15
-    ? `<b>${trend} candles</b> — established trend, good confidence`
-    : `<b>${trend} candles</b> — long-running trend, watch for exhaustion`;
-  rows.push(`<div class="why-row"><span class="why-icon">📅</span><span class="why-text">
-    EMA alignment held for ${trendSentence}
-  </span></div>`);
-
-  // ── Row 4: Volume confirmation ────────────────────────────────────────────
-  const volNum = parseFloat(vol) || 1;
-  const volWord = volNum >= 1.8
-    ? pos(`${volNum.toFixed(1)}x above average — strong confirmation`)
-    : volNum >= 1.2
-    ? neu(`${volNum.toFixed(1)}x above average — moderate confirmation`)
-    : neg(`${volNum.toFixed(1)}x average — low volume, signal less reliable`);
-  rows.push(`<div class="why-row"><span class="why-icon">📊</span><span class="why-text">
-    Volume: ${volWord}
-  </span></div>`);
-
-  // ── Row 5: Conviction + action consequence ────────────────────────────────
-  const convColor = clbl === 'STRONG' ? 'pos' : clbl === 'WEAK' ? 'neg' : 'neu';
-  let consequence = '';
-  if (isBuy || isHoldUp) {
-    if      (ipct === '100%') consequence = `deploying <b>100%</b> of allocated cash`;
-    else if (ipct === '75%')  consequence = `deploying only <b>75%</b> of cash — holding 25% back`;
-    else if (ipct === '50%')  consequence = `deploying only <b>50%</b> of cash — cautious sizing`;
-    else                      consequence = `deploying <b>${ipct}</b> of allocated cash`;
-  } else if (isSell) {
-    if      (clbl === 'STRONG')   consequence = `will sell <b>100%</b> of holdings (full exit)`;
-    else if (clbl === 'MODERATE') consequence = `will sell <b>50%</b> of holdings (partial exit)`;
-    else                          consequence = `will sell only <b>25%</b> of holdings (very cautious)`;
-  } else {
-    consequence = 'no action taken this tick';
-  }
-  rows.push(`<div class="why-row"><span class="why-icon">🎯</span><span class="why-text">
-    Conviction <span class="${convColor}"><b>${conv}/100 (${clbl})</b></span> →
-    if signal triggers, ${consequence}
-  </span></div>`);
-
-  // ── Row 6: What would change the signal ──────────────────────────────────
-  let change = '';
-  if (isHoldDn) {
-    change = `Signal becomes BUY when fast EMA crosses above slow EMA (needs price rally)`;
-  } else if (isHoldUp) {
-    change = `Signal becomes SELL if fast EMA crosses below slow EMA (needs price drop)`;
-  } else if (isBuy) {
-    change = `Will switch to HOLD(↑) on next candle unless EMA stays crossed`;
-  } else if (isSell) {
-    change = `Will switch to HOLD(↓) on next candle unless EMA stays crossed below`;
-  }
-  if (change) {
-    rows.push(`<div class="why-row"><span class="why-icon">🔮</span><span class="why-text">
-      <b>Next:</b> ${change}
-    </span></div>`);
-  }
-
-  return rows.join('');
-}
 
 // ── Transactions ───────────────────────────────────────
 async function loadTrades() {

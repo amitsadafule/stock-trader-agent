@@ -46,17 +46,23 @@ state = {
 # Per-symbol live data updated each loop tick
 stocks_state = {
     w["symbol"]: {
-        "symbol":       w["symbol"],
-        "exchange":     w["exchange"],
-        "weight":       w["weight"],
-        "signal":       "—",
-        "price":        "—",
-        "ema_green":    "—",
-        "ema_red":      "—",
-        "gap_pct":      "—",
-        "holdings_qty": 0,
-        "avg_price":    "—",
-        "error":        "",
+        "symbol":           w["symbol"],
+        "exchange":         w["exchange"],
+        "weight":           w["weight"],
+        "signal":           "—",
+        "price":            "—",
+        "ema_green":        "—",
+        "ema_red":          "—",
+        "gap_pct":          "—",
+        "gap_change":       "—",
+        "trend_candles":    "—",
+        "vol_ratio":        "—",
+        "conviction":       "—",
+        "conviction_label": "—",
+        "invest_pct":       "—",
+        "holdings_qty":     0,
+        "avg_price":        "—",
+        "error":            "",
     }
     for w in WATCHLIST
 }
@@ -198,18 +204,140 @@ def calc_ema(prices: list, period: int) -> list:
         ema.append(price * k + ema[-1] * (1 - k))
     return ema
 
-def get_signal(candles: list):
-    """Returns (signal_str, ema_green_val, ema_red_val, gap_pct)"""
+def analyse(candles: list) -> dict:
+    """
+    Full intelligence analysis of candle history.
+    Returns a rich dict used for both signal decision AND position sizing.
+
+    Signals:
+      "BUY"      — EMA fast just crossed above EMA slow (fresh crossover)
+      "SELL"     — EMA fast just crossed below EMA slow
+      "HOLD(↑)"  — EMA fast already above slow (bullish, no new crossover)
+      "HOLD(↓)"  — EMA fast already below slow (bearish)
+
+    Intelligence fields:
+      gap_pct        — % distance between EMAs (bigger = stronger trend)
+      gap_change     — how gap changed vs previous candle (+ve = widening = accelerating)
+      trend_candles  — how many consecutive candles EMA fast has been above/below slow
+      vol_ratio      — current volume vs 10-candle average (>1.5 = high volume confirmation)
+      conviction     — 0–100 score combining all above factors
+      conviction_label — "STRONG" / "MODERATE" / "WEAK"
+      invest_pct     — fraction of allocated cash to deploy (0.5–1.0)
+                       STRONG=100%, MODERATE=75%, WEAK=50%
+
+    Position sizing logic:
+      A STRONG BUY uses 100% of its allocated cash.
+      A WEAK BUY (tiny gap, shrinking, low volume) uses only 50% — keeps dry powder.
+      A STRONG SELL exits the full position.
+      A WEAK SELL exits only 25% — the signal may be false/temporary.
+    """
     cfg   = TRADING_CONFIG
     close = [r["close"] for r in candles]
-    eg    = calc_ema(close, cfg["ema_green_period"])
-    er    = calc_ema(close, cfg["ema_red_period"])
+    vols  = [r.get("volume", 0) for r in candles]
+
+    eg = calc_ema(close, cfg["ema_green_period"])
+    er = calc_ema(close, cfg["ema_red_period"])
+
     pg, pr = eg[-2], er[-2]
     cg, cr = eg[-1], er[-1]
-    gap   = abs(cg - cr) / cr * 100
-    if pg <= pr and cg > cr: return "BUY",  cg, cr, gap
-    if pg >= pr and cg < cr: return "SELL", cg, cr, gap
-    return f"HOLD({'↑' if cg > cr else '↓'})", cg, cr, gap
+    gap    = abs(cg - cr) / cr * 100
+
+    # ── Core signal ────────────────────────────────────────────────────────────
+    if   pg <= pr and cg > cr: signal = "BUY"
+    elif pg >= pr and cg < cr: signal = "SELL"
+    else:                       signal = f"HOLD({'↑' if cg > cr else '↓'})"
+
+    bullish = cg > cr
+
+    # ── Gap momentum: is the separation growing or shrinking? ─────────────────
+    prev_gap   = abs(pg - pr) / pr * 100
+    gap_change = gap - prev_gap   # +ve = widening (accelerating trend)
+
+    # ── Trend duration: consecutive candles in this EMA alignment ────────────
+    trend_candles = 0
+    for i in range(len(eg) - 1, -1, -1):
+        if (eg[i] > er[i]) == bullish:
+            trend_candles += 1
+        else:
+            break
+
+    # ── Volume ratio: current vs 10-candle rolling average ────────────────────
+    recent_v = [v for v in vols[-10:] if v > 0]
+    avg_vol  = sum(recent_v) / len(recent_v) if recent_v else 1
+    curr_vol = vols[-1] if vols[-1] > 0 else avg_vol
+    vol_ratio = curr_vol / avg_vol if avg_vol > 0 else 1.0
+
+    # ── Conviction score (0–100) ───────────────────────────────────────────────
+    # Four independent factors, each scored and summed.
+    score = 0
+    parts = []
+
+    # 1. Gap size (0–35 pts) — the primary "steepness" measure you asked about
+    #    0.2% gap→7pts  0.5%→17pts  1.0%→28pts  2%+→35pts
+    gap_score = min(35, int(gap * 17.5))
+    score += gap_score
+    parts.append(f"gap {gap:.2f}%→{gap_score}pt")
+
+    # 2. Momentum (±25 pts) — widening gap is strong, narrowing is a warning
+    if gap_change > 0:
+        mom = min(25, int(gap_change * 50))
+        score += mom
+        parts.append(f"↑momentum +{gap_change:.3f}%→+{mom}pt")
+    else:
+        pen = max(-15, int(gap_change * 20))
+        score += pen
+        parts.append(f"↓fading {gap_change:.3f}%→{pen}pt")
+
+    # 3. Volume confirmation (0–25 pts)
+    #    1x avg→0pts  1.5x→6pts  2x→12pts  3x+→25pts
+    vol_pts = min(25, int((vol_ratio - 1.0) * 12.5)) if vol_ratio > 1.0 else 0
+    score += vol_pts
+    parts.append(f"vol {vol_ratio:.1f}x→{vol_pts}pt")
+
+    # 4. Trend age (0–15 pts) — established trends score higher
+    #    1 candle→1pt  5→4pt  10→8pt  15+→12pt  but 30+ gets slight penalty (overextended)
+    if trend_candles <= 20:
+        age_pts = min(15, int(trend_candles * 0.75))
+    else:
+        age_pts = max(5, 15 - int((trend_candles - 20) * 0.5))
+    score += age_pts
+    parts.append(f"trend {trend_candles}c→{age_pts}pt")
+
+    score = max(0, min(100, score))
+
+    # ── Conviction label and invest fraction ──────────────────────────────────
+    if score >= 65:
+        label, invest_pct = "STRONG",   1.00
+    elif score >= 38:
+        label, invest_pct = "MODERATE", 0.75
+    else:
+        label, invest_pct = "WEAK",     0.50
+
+    reason_detail = (
+        f"Conviction {score}/100 ({label}) | "
+        + " | ".join(parts)
+        + f" | {trend_candles}c {'bull' if bullish else 'bear'}"
+    )
+
+    return {
+        "signal":           signal,
+        "ema_green":        cg,
+        "ema_red":          cr,
+        "gap_pct":          gap,
+        "gap_change":       gap_change,
+        "trend_candles":    trend_candles,
+        "vol_ratio":        vol_ratio,
+        "conviction":       score,
+        "conviction_label": label,
+        "invest_pct":       invest_pct,
+        "reason_detail":    reason_detail,
+    }
+
+
+def get_signal(candles: list):
+    """Backward-compat wrapper. Use analyse() for full intelligence."""
+    a = analyse(candles)
+    return a["signal"], a["ema_green"], a["ema_red"], a["gap_pct"]
 
 def is_market_open() -> bool:
     now = datetime.datetime.now(IST)
@@ -275,71 +403,104 @@ def recover_state() -> dict:
 # ── Multi-stock allocation strategy ──────────────────────────────────────────
 def allocate_cash(buy_signals: list, available_cash: float) -> dict:
     """
-    Allocates investable cash across buy signals.
+    Allocates investable cash using BOTH watchlist weights AND conviction scores.
 
-    Smart fallback: if splitting cash results in any allocation below
-    min_trade_amount, automatically concentrates into the fewest stocks
-    (strongest signals first) that can each receive a viable amount.
+    How it works:
+    1. Split investable cash proportionally by watchlist weight (only among
+       stocks that are actually signalling BUY right now).
+    2. Scale each stock's slice by its invest_pct from conviction:
+         STRONG (score 65+) → deploy 100% of its slice
+         MODERATE (38–64)   → deploy 75% of its slice
+         WEAK (<38)         → deploy only 50% of its slice
+    3. Cash "saved" by WEAK/MODERATE signals stays as reserve — not redistributed.
+       This means a WEAK signal never gets the full weight-based amount.
+    4. Smart fallback: if low total cash means any stock can't meet min_trade_amount,
+       drop the lowest-conviction stocks first until remaining can each be filled.
+
+    Example with ₹10,000, SILVERIETF(w=40, STRONG) + GOLDETF(w=30, WEAK):
+      Weight split:  SILVER=₹5,333  GOLD=₹4,000  (reserve ₹667 always held)
+      Conviction:    SILVER×1.0=₹5,333  GOLD×0.5=₹2,000
+      → SILVER gets ₹5,333, GOLD gets ₹2,000, ₹2,667 stays as dry powder
     """
     cfg        = TRADING_CONFIG
     strategy   = cfg.get("multi_buy_strategy", "weighted")
     reserve    = cfg.get("min_cash_reserve_pct", 0.10)
-    min_order  = cfg.get("min_trade_amount", 500)
+    min_order  = cfg.get("min_trade_amount", 200)
     investable = available_cash * (1 - reserve)
 
     if not buy_signals:
         return {}
 
-    # ── Helper: check if all allocations are above min_order ─────────────────
-    def all_viable(alloc: dict) -> bool:
-        return all(v >= min_order for v in alloc.values())
-
-    # ── Initial allocation by strategy ────────────────────────────────────────
-    def make_allocation(signals: list) -> dict:
+    def raw_allocation(signals: list) -> dict:
+        """Base allocation by strategy before conviction scaling."""
         alloc = {}
         if strategy == "top1" or len(signals) == 1:
-            best = max(signals, key=lambda x: x["gap_pct"])
+            best = max(signals, key=lambda x: x.get("conviction", 50))
             alloc[best["symbol"]] = investable
         elif strategy == "equal":
             per = investable / len(signals)
             for s in signals: alloc[s["symbol"]] = per
         else:  # weighted
             total_w = sum(s["weight"] for s in signals)
-            for s in signals: alloc[s["symbol"]] = investable * (s["weight"] / total_w)
+            for s in signals:
+                alloc[s["symbol"]] = investable * (s["weight"] / total_w)
         return alloc
 
-    allocation = make_allocation(buy_signals)
+    def apply_conviction(raw: dict, signals: list) -> dict:
+        """Scale each allocation down by conviction invest_pct."""
+        sig_map = {s["symbol"]: s for s in signals}
+        return {
+            sym: amt * sig_map[sym].get("invest_pct", 1.0)
+            for sym, amt in raw.items()
+        }
 
-    # ── Smart fallback: drop weakest signals until all get viable amounts ─────
+    def all_viable(alloc: dict) -> bool:
+        return all(v >= min_order for v in alloc.values() if v > 0)
+
+    # Initial allocation with conviction scaling
+    allocation = apply_conviction(raw_allocation(buy_signals), buy_signals)
+
+    # Smart fallback: if low cash, drop lowest-conviction stocks first
     if not all_viable(allocation) and len(buy_signals) > 1:
-        # Sort by signal strength (biggest EMA gap = strongest)
-        ranked = sorted(buy_signals, key=lambda x: x["gap_pct"], reverse=True)
+        ranked = sorted(buy_signals, key=lambda x: x.get("conviction", 0), reverse=True)
         for n in range(len(ranked), 0, -1):
-            candidate = make_allocation(ranked[:n])
+            candidate = apply_conviction(raw_allocation(ranked[:n]), ranked[:n])
             if all_viable(candidate):
                 allocation = candidate
                 dropped = [s["symbol"] for s in ranked[n:]]
                 if dropped:
                     log.info(
-                        f"💡 Low cash fallback: dropped {dropped} (weak signals), "
-                        f"concentrating ₹{investable:.0f} into {[s['symbol'] for s in ranked[:n]]}"
+                        f"💡 Low cash: dropped {dropped} (lowest conviction), "
+                        f"concentrating into "
+                        f"{[(s['symbol'], s.get('conviction',0), s.get('conviction_label','?')) for s in ranked[:n]]}"
                     )
                 break
         else:
-            # Even 1 stock can't meet min — put everything into the strongest
-            best = max(buy_signals, key=lambda x: x["gap_pct"])
-            allocation = {best["symbol"]: investable}
+            # Even single stock can't meet min — use everything on highest conviction
+            best = max(buy_signals, key=lambda x: x.get("conviction", 0))
+            allocation = {best["symbol"]: investable * best.get("invest_pct", 1.0)}
             log.info(
-                f"💡 Cash too low to split — putting ₹{investable:.0f} into "
-                f"{best['symbol']} (strongest gap {best['gap_pct']:.2f}%)"
+                f"💡 Cash too low to split — all to {best['symbol']} "
+                f"conviction={best.get('conviction',0)}/100 ({best.get('conviction_label','?')})"
             )
 
-    log.info(f"💰 Allocation: total=₹{investable:.0f} | {allocation}")
+    # Final log with conviction context per stock
+    for s in buy_signals:
+        sym  = s["symbol"]
+        amt  = allocation.get(sym, 0)
+        conv = s.get("conviction", "?")
+        lbl  = s.get("conviction_label", "?")
+        ipct = int(s.get("invest_pct", 1.0) * 100)
+        log.info(
+            f"💰 {sym}: ₹{amt:.0f} allocated | "
+            f"conviction={conv}/100 ({lbl}) | deploying {ipct}% of weight-share"
+        )
     return allocation
 
 # ── Place buy/sell ────────────────────────────────────────────────────────────
 def do_buy(symbol: str, exchange: str, cash_to_use: float, price: float,
-           eg: float, er: float, gap: float, qty_held: int, catchup: bool = False):
+           eg: float, er: float, gap: float, qty_held: int, catchup: bool = False,
+           intel: dict = None):
     cfg = TRADING_CONFIG
     qty = int(cash_to_use // price)
     log.info(
@@ -365,11 +526,12 @@ def do_buy(symbol: str, exchange: str, cash_to_use: float, price: float,
 
     tag    = "CATCHUP-BUY" if catchup else "BUY"
     dry    = cfg.get("dry_run")
+    intel_str = intel.get("reason_detail", "") if intel else ""
     reason = (
         f"{'STARTUP CATCH-UP: ' if catchup else ''}"
         f"EMA{cfg['ema_green_period']} ({eg:.2f}) {'already ABOVE' if catchup else 'crossed ABOVE'} "
-        f"EMA{cfg['ema_red_period']} ({er:.2f}). Gap: {gap:.2f}%."
-        f"{' Multi-stock allocation.' if not catchup else ''}"
+        f"EMA{cfg['ema_red_period']} ({er:.2f}). Gap: {gap:.2f}%. "
+        f"{intel_str}"
         + (" [DRY RUN]" if dry else "")
     )
 
@@ -403,7 +565,8 @@ def do_buy(symbol: str, exchange: str, cash_to_use: float, price: float,
     stocks_state[symbol]["error"] = ""
 
 def do_sell(symbol: str, exchange: str, qty_held: int, avg_p: float,
-            price: float, eg: float, er: float, gap: float, cash: float):
+            price: float, eg: float, er: float, gap: float, cash: float,
+            intel: dict = None):
     cfg          = TRADING_CONFIG
     holding_days = 0
     bd           = _buy_date_tracker.get(symbol)
@@ -418,15 +581,34 @@ def do_sell(symbol: str, exchange: str, qty_held: int, avg_p: float,
         log.info(f"📉 {symbol}: skip sell — profit {profit_pct:.2f}% < threshold")
         return
 
-    is_strong = gap >= cfg["strong_signal_threshold"] * 100
-    is_ltcg   = holding_days >= cfg["stcg_holding_days"]
-    sell_qty  = qty_held if (is_strong or is_ltcg) else max(1, int(qty_held * cfg["partial_sell_pct"]))
-    sell_type = "FULL" if sell_qty == qty_held else "PARTIAL"
-    tax_note  = (f"LTCG 10% — held {holding_days}d." if is_ltcg
-                 else f"STCG 15% — {sell_type} sell. Gap {gap:.2f}%, held {holding_days}d.")
+    # ── Conviction-aware sell sizing ─────────────────────────────────────────
+    # STRONG conviction + strong gap  → full exit (trend reversal is real)
+    # MODERATE conviction             → sell 50% (may be temporary pullback)
+    # WEAK conviction                 → sell only 25% (very cautious, false signal risk)
+    # LTCG (held >365d)               → always full exit regardless of conviction
+    conv_label = intel.get("conviction_label", "MODERATE") if intel else "MODERATE"
+    conv_score = intel.get("conviction", 50) if intel else 50
+    is_strong_gap = gap >= cfg["strong_signal_threshold"] * 100
+    is_ltcg       = holding_days >= cfg["stcg_holding_days"]
+
+    if is_ltcg:
+        sell_qty, sell_type = qty_held, "FULL(LTCG)"
+    elif conv_label == "STRONG" or (conv_label == "MODERATE" and is_strong_gap):
+        sell_qty, sell_type = qty_held, "FULL"
+    elif conv_label == "MODERATE":
+        sell_qty  = max(1, int(qty_held * cfg["partial_sell_pct"]))
+        sell_type = "PARTIAL-50%"
+    else:  # WEAK — very conservative, may be noise
+        sell_qty  = max(1, int(qty_held * 0.25))
+        sell_type = "PARTIAL-25%"
+
+    tax_note = (f"LTCG 10% — held {holding_days}d." if is_ltcg
+                else f"STCG 15% — {sell_type} sell. Gap {gap:.2f}%, conviction={conv_score}/100, held {holding_days}d.")
     dry       = cfg.get("dry_run")
+    intel_str = intel.get("reason_detail", "") if intel else ""
     reason    = (f"EMA{cfg['ema_green_period']} ({eg:.2f}) crossed BELOW "
-                 f"EMA{cfg['ema_red_period']} ({er:.2f}). Gap: {gap:.2f}%. Profit: {profit_pct:.2f}%.")
+                 f"EMA{cfg['ema_red_period']} ({er:.2f}). Gap: {gap:.2f}%. "
+                 f"Profit: {profit_pct:.2f}%. {intel_str}")
 
     if dry:
         oid = "DRY-SELL"
@@ -538,56 +720,73 @@ def agent_loop():
                 exch  = w["exchange"]
                 ss    = stocks_state[sym]
                 try:
-                    df                = get_candles(sym, exch)
-                    sig, eg, er, gap  = get_signal(df)
-                    quote             = kite.quote(f"{exch}:{sym}")
-                    price             = float(quote[f"{exch}:{sym}"]["last_price"])
-                    h_list            = kite.holdings()
-                    holding           = next((h for h in h_list if h["tradingsymbol"] == sym), None)
-                    qty_held          = holding["quantity"]      if holding else 0
-                    avg_p             = holding["average_price"] if holding else 0
+                    df    = get_candles(sym, exch)
+                    intel = analyse(df)          # ← full intelligence analysis
+                    sig   = intel["signal"]
+                    eg    = intel["ema_green"]
+                    er    = intel["ema_red"]
+                    gap   = intel["gap_pct"]
+
+                    quote    = kite.quote(f"{exch}:{sym}")
+                    price    = float(quote[f"{exch}:{sym}"]["last_price"])
+                    h_list   = kite.holdings()
+                    holding  = next((h for h in h_list if h["tradingsymbol"] == sym), None)
+                    qty_held = holding["quantity"]      if holding else 0
+                    avg_p    = holding["average_price"] if holding else 0
 
                     log.info(
-                        f"📈 {sym} | price=₹{price:.2f} | "
+                        f"📈 {sym} | ₹{price:.2f} | "
                         f"EMA{cfg['ema_green_period']}={eg:.4f} EMA{cfg['ema_red_period']}={er:.4f} "
-                        f"gap={gap:.2f}% | signal={sig} | "
-                        f"qty={qty_held} avg=₹{avg_p:.2f} | candles={len(df)}"
+                        f"gap={gap:.2f}% Δ{intel['gap_change']:+.3f}% | "
+                        f"vol={intel['vol_ratio']:.1f}x | trend={intel['trend_candles']}c | "
+                        f"conviction={intel['conviction']}/100({intel['conviction_label']}) | "
+                        f"signal={sig} | qty={qty_held} avg=₹{avg_p:.2f}"
                     )
 
-                    # Update per-stock live state
-                    ss["signal"]       = sig
-                    ss["price"]        = f"₹{price:.2f}"
-                    ss["ema_green"]    = f"{eg:.4f}"
-                    ss["ema_red"]      = f"{er:.4f}"
-                    ss["gap_pct"]      = f"{gap:.2f}%"
-                    ss["holdings_qty"] = qty_held
-                    ss["avg_price"]    = f"₹{avg_p:.2f}" if avg_p else "—"
-                    ss["error"]        = ""
+                    # ── Update all live state including new intelligence fields ─
+                    ss["signal"]           = sig
+                    ss["price"]            = f"₹{price:.2f}"
+                    ss["ema_green"]        = f"{eg:.4f}"
+                    ss["ema_red"]          = f"{er:.4f}"
+                    ss["gap_pct"]          = f"{gap:.2f}%"
+                    ss["gap_change"]       = f"{intel['gap_change']:+.3f}%"
+                    ss["trend_candles"]    = intel["trend_candles"]
+                    ss["vol_ratio"]        = f"{intel['vol_ratio']:.2f}x"
+                    ss["conviction"]       = intel["conviction"]
+                    ss["conviction_label"] = intel["conviction_label"]
+                    ss["invest_pct"]       = f"{int(intel['invest_pct']*100)}%"
+                    ss["holdings_qty"]     = qty_held
+                    ss["avg_price"]        = f"₹{avg_p:.2f}" if avg_p else "—"
+                    ss["error"]            = ""
 
                     is_catchup = (_first_run and eg > er
                                   and sig.startswith("HOLD") and qty_held == 0)
                     if is_catchup:
-                        log.info(
-                            f"🚀 {sym}: CATCH-UP BUY eligible — "                            f"EMA{cfg['ema_green_period']}={eg:.4f} > EMA{cfg['ema_red_period']}={er:.4f}, "                            f"gap={gap:.2f}%, holdings=0, cash=₹{cash:.2f}"
-                        )
+                        log.info(f"🚀 {sym}: CATCH-UP BUY | {intel['reason_detail']}")
                     elif _first_run and sig.startswith("HOLD"):
                         log.info(
-                            f"ℹ️  {sym}: first-run HOLD, no catch-up — "                            f"eg={eg:.4f} er={er:.4f} bearish={eg<=er} qty={qty_held}"
+                            f"ℹ️  {sym}: first-run HOLD, no catch-up — "
+                            f"bearish={eg<=er} qty={qty_held}"
                         )
 
                     if sig == "BUY" or is_catchup:
                         buy_signals.append({
-                            "symbol": sym, "exchange": exch,
-                            "weight": w["weight"], "gap_pct": gap,
-                            "price": price, "eg": eg, "er": er,
-                            "qty_held": qty_held, "avg_p": avg_p,
-                            "catchup": is_catchup,
+                            "symbol":     sym,  "exchange": exch,
+                            "weight":     w["weight"], "gap_pct": gap,
+                            "price":      price, "eg": eg, "er": er,
+                            "qty_held":   qty_held, "avg_p": avg_p,
+                            "catchup":    is_catchup,
+                            "conviction": intel["conviction"],
+                            "invest_pct": intel["invest_pct"],
+                            "intel":      intel,
                         })
                     elif sig == "SELL" and qty_held > 0:
                         sell_signals.append({
-                            "symbol": sym, "exchange": exch,
-                            "price": price, "eg": eg, "er": er,
-                            "gap_pct": gap, "qty_held": qty_held, "avg_p": avg_p,
+                            "symbol":     sym,  "exchange": exch,
+                            "price":      price, "eg": eg, "er": er,
+                            "gap_pct":    gap, "qty_held": qty_held, "avg_p": avg_p,
+                            "conviction": intel["conviction"],
+                            "intel":      intel,
                         })
 
                 except Exception as e:
@@ -599,7 +798,8 @@ def agent_loop():
             # ── Execute sells first (free up cash before buying) ──────────────
             for s in sell_signals:
                 do_sell(s["symbol"], s["exchange"], s["qty_held"], s["avg_p"],
-                        s["price"], s["eg"], s["er"], s["gap_pct"], cash)
+                        s["price"], s["eg"], s["er"], s["gap_pct"], cash,
+                        intel=s.get("intel"))
 
             # ── Refresh cash after sells ──────────────────────────────────────
             if sell_signals:
@@ -618,7 +818,8 @@ def agent_loop():
                         continue
                     # Note: do_buy itself checks if qty*price >= min_trade_amount
                     do_buy(sym, s["exchange"], cash_alloc, s["price"],
-                           s["eg"], s["er"], s["gap_pct"], s["qty_held"], s["catchup"])
+                           s["eg"], s["er"], s["gap_pct"], s["qty_held"], s["catchup"],
+                           intel=s.get("intel"))
 
             _first_run = False  # only clear AFTER buys executed this tick
 
