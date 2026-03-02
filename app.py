@@ -82,6 +82,9 @@ stocks_state = {
         "news_summary":     "—",
         "news_headlines":   [],
         "news_fetched_at":  "—",
+        "news_delta":       0,
+        "news_note":        "",
+        "news_ready":       False,
         "error":            "",
     }
     for w in WATCHLIST
@@ -363,11 +366,11 @@ def get_signal(candles: list):
 # ── Background news fetcher ───────────────────────────────────────────────────
 def _news_worker():
     """
-    Runs in a daemon thread. Refreshes news sentiment for all watchlist stocks
-    every 30 minutes. News is cached in news.py and only refetched when stale.
+    Daemon thread — refreshes news sentiment for all watchlist stocks every 30 min.
     Runs independently of the trading loop — never blocks trade execution.
+    On startup runs immediately so first tick has fresh data (not stale NEUTRAL).
     """
-    log.info("📰 News worker started")
+    log.info("📰 News worker started — fetching initial sentiment for all stocks")
     while True:
         for w in WATCHLIST:
             sym = w["symbol"]
@@ -381,10 +384,16 @@ def _news_worker():
                         ss["news_summary"]    = result["summary"]
                         ss["news_headlines"]  = result["headlines"]
                         ss["news_fetched_at"] = result["fetched_at"]
+                        ss["news_delta"]      = result.get("conviction_delta", 0)
+                        ss["news_ready"]      = True   # flag: at least one fetch done
+                log.info(
+                    f"📰 {sym}: {result['label']} score={result['score']:+d} "
+                    f"delta={result['conviction_delta']:+d}pt | {result['summary']}"
+                )
             except Exception as e:
-                log.warning(f"📰 {sym} news error: {e}")
-            time.sleep(3)   # small gap between stocks to avoid rate limiting
-        time.sleep(1800)    # refresh every 30 minutes
+                log.warning(f"📰 {sym} news worker error: {type(e).__name__}: {e}")
+            time.sleep(3)
+        time.sleep(1800)   # refresh every 30 min
 
 
 def apply_news_to_conviction(intel: dict, symbol: str) -> dict:
@@ -401,9 +410,18 @@ def apply_news_to_conviction(intel: dict, symbol: str) -> dict:
       NEUTRAL / no news         → 0 pts
     """
     ss = stocks_state.get(symbol, {})
-    news_label = ss.get("news_label", "NEUTRAL")
-    news_score = ss.get("news_score", 0)
+    news_label   = ss.get("news_label", "NEUTRAL")
+    news_score   = ss.get("news_score", 0)
     news_summary = ss.get("news_summary", "")
+    news_ready   = ss.get("news_ready", False)
+
+    # Worker hasn't completed first fetch yet — don't apply stale NEUTRAL
+    if not news_ready:
+        updated = dict(intel)
+        updated["news_delta"] = 0
+        updated["news_note"]  = "📰 News pending first fetch…"
+        updated["reason_detail"] = intel["reason_detail"] + " | 📰 News pending…"
+        return updated
 
     sig = intel.get("signal", "")
     is_bullish_signal = "BUY" in sig or "↑" in sig
