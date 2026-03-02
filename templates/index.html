@@ -71,6 +71,23 @@ html,body{height:100%;background:var(--bg);color:var(--text);
 .mbar-open{background:rgba(34,197,94,.1);color:var(--green);}
 .mbar-closed{background:rgba(107,107,128,.1);color:var(--muted);}
 
+/* Opening volatility banner */
+.ov-banner{display:none;align-items:flex-start;gap:10px;padding:10px 12px;
+  border-radius:10px;border:1px solid;margin-bottom:10px;}
+.ov-banner.active{display:flex;}
+.ov-banner.state-blocked{background:rgba(245,158,11,.1);border-color:rgba(245,158,11,.3);}
+.ov-banner.state-early{background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.3);}
+.ov-icon{font-size:1.2rem;flex-shrink:0;margin-top:1px;}
+.ov-body{flex:1;}
+.ov-title{font-size:0.75rem;font-weight:700;margin-bottom:3px;}
+.state-blocked .ov-title{color:var(--amber);}
+.state-early   .ov-title{color:var(--green);}
+.ov-reason{font-size:0.68rem;color:var(--muted);line-height:1.45;}
+.ov-progress{height:4px;background:var(--border);border-radius:2px;margin-top:7px;overflow:hidden;}
+.ov-progress-fill{height:4px;border-radius:2px;transition:width 1s linear;}
+.state-blocked .ov-progress-fill{background:var(--amber);}
+.state-early   .ov-progress-fill{background:var(--green);}
+
 /* Stock cards */
 .stock-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;
   padding:14px;margin-bottom:10px;transition:border-color .3s;}
@@ -206,6 +223,45 @@ html,body{height:100%;background:var(--bg);color:var(--text);
 .why-text .neg{color:var(--red);font-weight:700;}
 .why-text .neu{color:var(--amber);font-weight:700;}
 
+/* News panel */
+.news-panel{margin-top:10px;border-radius:10px;overflow:hidden;border:1px solid var(--border);}
+.news-header{display:flex;align-items:center;justify-content:space-between;
+  padding:8px 12px;background:var(--surface2);cursor:pointer;user-select:none;}
+.news-header-left{display:flex;align-items:center;gap:8px;}
+.news-title{font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;}
+.news-badge{font-size:0.65rem;font-weight:700;padding:2px 8px;border-radius:10px;}
+.news-BULLISH{background:rgba(34,197,94,.2);color:var(--green);}
+.news-BEARISH{background:rgba(239,68,68,.2);color:var(--red);}
+.news-NEUTRAL{background:rgba(107,107,128,.15);color:var(--muted);}
+.news-score-pill{font-size:0.62rem;color:var(--muted);padding:2px 6px;
+  background:var(--border);border-radius:8px;}
+.news-toggle{font-size:0.7rem;color:var(--muted);transition:transform .2s;}
+.news-toggle.open{transform:rotate(180deg);}
+.news-body{display:none;padding:8px 10px;}
+.news-body.open{display:block;}
+.news-summary{font-size:0.72rem;color:var(--muted);margin-bottom:8px;
+  padding:5px 8px;background:var(--surface);border-radius:6px;
+  border-left:2px solid var(--border);}
+.news-item{display:flex;flex-direction:column;gap:2px;padding:7px 0;
+  border-bottom:1px solid var(--border);}
+.news-item:last-child{border-bottom:none;}
+.news-item-top{display:flex;align-items:flex-start;gap:7px;}
+.news-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:4px;}
+.news-dot-positive{background:var(--green);}
+.news-dot-negative{background:var(--red);}
+.news-dot-neutral{background:var(--muted);}
+.news-headline{font-size:0.76rem;line-height:1.4;color:var(--text);}
+.news-headline a{color:inherit;text-decoration:none;}
+.news-headline a:hover{text-decoration:underline;}
+.news-meta{display:flex;gap:8px;font-size:0.62rem;color:var(--muted);margin-left:15px;}
+.news-delta-row{display:flex;align-items:center;justify-content:space-between;
+  margin-top:8px;padding:6px 8px;border-radius:6px;background:var(--surface);}
+.news-delta-label{font-size:0.65rem;color:var(--muted);}
+.news-delta-val{font-size:0.75rem;font-weight:700;}
+.news-refresh{font-size:0.62rem;color:var(--blue);text-align:right;
+  margin-top:6px;cursor:pointer;padding:4px;}
+.news-loading{font-size:0.72rem;color:var(--muted);padding:10px;text-align:center;}
+
 /* Why box */
 .why-box{margin-top:10px;border-radius:10px;padding:10px 12px;border-left:3px solid;}
 .why-box-BUY{background:rgba(34,197,94,.07);border-color:var(--green);}
@@ -296,6 +352,32 @@ html,body{height:100%;background:var(--bg);color:var(--text);
         <span style="opacity:.4">·</span>
         <span id="last-checked">{{ state.last_checked }}</span>
       </div>
+
+      <!-- Opening volatility guard banner — shown when blocked OR when early override fires -->
+      {% if state.opening_volatile %}
+      <div class="ov-banner active state-blocked" id="ov-banner">
+        <span class="ov-icon">⚠️</span>
+        <div class="ov-body">
+          <div class="ov-title">Opening Volatility Guard — Trading Paused</div>
+          <div class="ov-reason" id="ov-reason">{{ state.opening_reason }}</div>
+          <div class="ov-reason" style="margin-top:3px;">
+            Signals are <b>monitored</b> — orders resume at <b>{{ state.opening_wait_until }}</b>,
+            or earlier if a strong breakout is detected
+          </div>
+          <div class="ov-progress"><div class="ov-progress-fill" id="ov-progress" style="width:0%"></div></div>
+        </div>
+      </div>
+      {% elif state.opening_early %}
+      <div class="ov-banner active state-early" id="ov-banner">
+        <span class="ov-icon">🚀</span>
+        <div class="ov-body">
+          <div class="ov-title">Strong Breakout — Early Entry Override Active</div>
+          <div class="ov-reason" id="ov-reason">{{ state.opening_reason }}</div>
+        </div>
+      </div>
+      {% else %}
+      <div class="ov-banner" id="ov-banner"></div>
+      {% endif %}
 
       <!-- Agent control -->
       <div class="card">
@@ -501,6 +583,23 @@ html,body{height:100%;background:var(--bg);color:var(--text);
           ⚠️ {{ s.error }}
         </div>
         {% endif %}
+
+        <!-- News sentiment panel — JS populates this from /api/news -->
+        <div class="news-panel" id="news-panel-{{ s.symbol }}">
+          <div class="news-header" onclick="toggleNews('{{ s.symbol }}')">
+            <div class="news-header-left">
+              <span style="font-size:0.9rem;">📰</span>
+              <span class="news-title">News Sentiment</span>
+              <span class="news-badge news-NEUTRAL" id="news-badge-{{ s.symbol }}">—</span>
+              <span class="news-score-pill" id="news-score-{{ s.symbol }}">score —</span>
+            </div>
+            <span class="news-toggle" id="news-toggle-{{ s.symbol }}">▼</span>
+          </div>
+          <div class="news-body" id="news-body-{{ s.symbol }}">
+            <div class="news-loading">⏳ Loading news…</div>
+          </div>
+        </div>
+
       </div>
       {% endfor %}
       {% endif %}
@@ -593,6 +692,7 @@ function switchTab(name, el) {
 async function pollStatus() {
   try {
     const d = await (await fetch('/status')).json();
+    window._lastStatus = d;   // cache for why-box OV guard row
 
     // Top-level
     setTxt('cash-val', d.cash || '—');
@@ -607,6 +707,45 @@ async function pollStatus() {
     const mbar = document.getElementById('mbar');
     if (mbar) {
       mbar.className = 'mbar ' + (d.market_open ? 'mbar-open' : 'mbar-closed');
+    }
+
+    // Opening volatility banner
+    const ovBanner = document.getElementById('ov-banner');
+    const isBlocked = d.opening_volatile;
+    const isEarly   = d.opening_early;
+    if (ovBanner) {
+      if (isBlocked) {
+        ovBanner.className = 'ov-banner active state-blocked';
+        ovBanner.innerHTML = `
+          <span class="ov-icon">⚠️</span>
+          <div class="ov-body">
+            <div class="ov-title">Opening Volatility Guard — Trading Paused</div>
+            <div class="ov-reason">${d.opening_reason || ''}</div>
+            <div class="ov-reason" style="margin-top:3px;">
+              Signals are <b>monitored</b> — orders resume at <b>${d.opening_wait_until || '—'}</b>,
+              or earlier if a strong breakout is detected
+            </div>
+            <div class="ov-progress"><div class="ov-progress-fill" id="ov-progress" style="width:0%"></div></div>
+          </div>`;
+        // Animate progress bar
+        const buf = {{ cfg.get('opening_buffer_minutes', 30) }};
+        const openIST = new Date(); openIST.setHours(9,15,0,0);
+        const elapsed = Math.max(0,(new Date()-openIST)/60000);
+        const pct = Math.min(100,(elapsed/buf)*100);
+        const pb = document.getElementById('ov-progress');
+        if (pb) pb.style.width = pct + '%';
+      } else if (isEarly) {
+        ovBanner.className = 'ov-banner active state-early';
+        ovBanner.innerHTML = `
+          <span class="ov-icon">🚀</span>
+          <div class="ov-body">
+            <div class="ov-title">Strong Breakout — Early Entry Override Active</div>
+            <div class="ov-reason">${d.opening_reason || ''}</div>
+          </div>`;
+      } else {
+        ovBanner.className = 'ov-banner';
+        ovBanner.innerHTML = '';
+      }
     }
 
     // Per-stock updates
@@ -802,6 +941,22 @@ function buildWhyRows(s) {
     </span></div>`);
   }
 
+  // ── Row 7 (conditional): Opening volatility guard notice ──────────────────
+  const statusData = window._lastStatus || {};
+  if (statusData.opening_volatile) {
+    rows.push(`<div class="why-row"><span class="why-icon">⏸️</span><span class="why-text">
+      <span class="neu"><b>Order paused</b></span> — opening volatility guard active.
+      Signal is <b>valid</b> but waiting for market to settle
+      ${statusData.opening_wait_until ? `(resumes at <b>${statusData.opening_wait_until}</b>)` : ''}.
+      Will fire automatically if a strong breakout is confirmed, or after the buffer clears.
+    </span></div>`);
+  } else if (statusData.opening_early) {
+    rows.push(`<div class="why-row"><span class="why-icon">🚀</span><span class="why-text">
+      <span class="pos"><b>Early-entry override</b></span> — strong breakout detected during opening buffer.
+      Conviction, widening gap, and high volume all confirmed — order placed early.
+    </span></div>`);
+  }
+
   return rows.join('');
 }
 
@@ -882,6 +1037,120 @@ document.getElementById('install-banner')?.addEventListener('click', async e=>{
   if(e.target.style.cursor==='pointer') return;
   if(_deferred){_deferred.prompt(); _deferred=null; document.getElementById('install-banner').style.display='none';}
 });
+
+// ── News panel ────────────────────────────────────────
+let _newsData = {};
+
+async function loadAllNews() {
+  try {
+    _newsData = await (await fetch('/api/news')).json();
+    Object.keys(_newsData).forEach(sym => renderNews(sym, _newsData[sym]));
+  } catch(e) {
+    console.warn('News fetch failed:', e);
+  }
+}
+
+function renderNews(sym, data) {
+  if (!data) return;
+
+  // Update header badge and score pill
+  const badge = document.getElementById(`news-badge-${sym}`);
+  const scorePill = document.getElementById(`news-score-${sym}`);
+  if (badge) {
+    badge.textContent = data.label || '—';
+    badge.className = `news-badge news-${data.label || 'NEUTRAL'}`;
+  }
+  if (scorePill) {
+    const s = data.score || 0;
+    scorePill.textContent = `score ${s > 0 ? '+' : ''}${s}`;
+    scorePill.style.color = s > 20 ? 'var(--green)' : s < -20 ? 'var(--red)' : '';
+  }
+
+  // Build body content
+  const body = document.getElementById(`news-body-${sym}`);
+  if (!body) return;
+
+  const headlines = data.headlines || [];
+  const delta = data.delta || 0;
+  const summary = data.summary || 'No data';
+  const fetched = data.fetched_at ? new Date(data.fetched_at).toLocaleTimeString('en-IN') : '';
+
+  let html = '';
+
+  // Summary line
+  html += `<div class="news-summary">${summary}</div>`;
+
+  // Conviction delta row
+  if (delta !== 0) {
+    const dColor = delta > 0 ? 'var(--green)' : 'var(--red)';
+    const dSign  = delta > 0 ? '+' : '';
+    html += `<div class="news-delta-row">
+      <span class="news-delta-label">Conviction impact from news</span>
+      <span class="news-delta-val" style="color:${dColor}">${dSign}${delta} pts</span>
+    </div>`;
+  }
+
+  // Headlines
+  if (headlines.length === 0) {
+    html += `<div style="font-size:0.72rem;color:var(--muted);padding:8px 0;text-align:center;">
+      No relevant headlines found in last 24h
+    </div>`;
+  } else {
+    headlines.forEach(h => {
+      const dotCls = `news-dot-${h.sentiment || 'neutral'}`;
+      const age    = h.age_hours > 0 ? `${h.age_hours}h ago` : 'recent';
+      const link   = h.url
+        ? `<a href="${h.url}" target="_blank" rel="noopener">${h.title}</a>`
+        : h.title;
+      html += `<div class="news-item">
+        <div class="news-item-top">
+          <div class="news-dot ${dotCls}"></div>
+          <div class="news-headline">${link}</div>
+        </div>
+        <div class="news-meta">
+          <span>${h.source || ''}</span>
+          <span>${age}</span>
+        </div>
+      </div>`;
+    });
+  }
+
+  // Fetched at + refresh button
+  html += `<div class="news-refresh" onclick="refreshNews('${sym}')">
+    🔄 Refresh &nbsp;·&nbsp; Last fetched: ${fetched}
+  </div>`;
+
+  body.innerHTML = html;
+}
+
+function toggleNews(sym) {
+  const body   = document.getElementById(`news-body-${sym}`);
+  const toggle = document.getElementById(`news-toggle-${sym}`);
+  if (!body) return;
+  const isOpen = body.classList.contains('open');
+  body.classList.toggle('open', !isOpen);
+  if (toggle) toggle.classList.toggle('open', !isOpen);
+  // Lazy-load: if opening for first time and still shows loading, fetch now
+  if (!isOpen && body.querySelector('.news-loading')) {
+    loadAllNews();
+  }
+}
+
+async function refreshNews(sym) {
+  const body = document.getElementById(`news-body-${sym}`);
+  if (body) body.innerHTML = '<div class="news-loading">⏳ Refreshing…</div>';
+  try {
+    await fetch('/api/news/refresh');
+    await new Promise(r => setTimeout(r, 2000));  // wait 2s for worker
+    await loadAllNews();
+  } catch(e) {
+    if (body) body.innerHTML = '<div class="news-loading">Failed to refresh</div>';
+  }
+}
+
+// Fetch news on page load and every 10 minutes
+loadAllNews();
+setInterval(loadAllNews, 600000);
 
 // ── Util ───────────────────────────────────────────────
 function b64ToUint8(b64){

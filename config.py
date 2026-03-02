@@ -54,7 +54,7 @@ TRADING_CONFIG = {
     "check_interval_seconds": 1800,
 
     # ── Dry run ─────────────────────────────────────────────
-    "dry_run": False,   # Set False to place real orders
+    "dry_run": True,   # Set False to place real orders
 }
 
 PATHS = {

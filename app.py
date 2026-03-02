@@ -20,6 +20,17 @@ except ImportError:
 
 from config import ZERODHA_CONFIG, TRADING_CONFIG, WATCHLIST, PATHS
 
+# ── News sentiment (free RSS scraper — no API key needed) ─────────────────────
+try:
+    from news import get_news_sentiment, clear_cache as clear_news_cache
+    NEWS_AVAILABLE = True
+except ImportError:
+    NEWS_AVAILABLE = False
+    def get_news_sentiment(sym, **kw):
+        return {"score": 0, "label": "NEUTRAL", "headlines": [],
+                "conviction_delta": 0, "summary": "news.py not found", "error": ""}
+    def clear_news_cache(sym=None): pass
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +50,10 @@ state = {
     "last_checked":         "—",
     "last_error":           "",
     "market_open":          False,
+    "opening_volatile":     False,   # True = blocked (buffer active, no override granted)
+    "opening_early":        False,   # True = override granted, trading early despite buffer
+    "opening_reason":       "",      # human-readable reason shown in UI
+    "opening_wait_until":   "",      # e.g. "9:45 AM"
     "notifications_enabled": False,
     "dry_run":              TRADING_CONFIG.get("dry_run", True),
     "recovery":             None,
@@ -62,6 +77,11 @@ stocks_state = {
         "invest_pct":       "—",
         "holdings_qty":     0,
         "avg_price":        "—",
+        "news_score":       0,
+        "news_label":       "—",
+        "news_summary":     "—",
+        "news_headlines":   [],
+        "news_fetched_at":  "—",
         "error":            "",
     }
     for w in WATCHLIST
@@ -72,6 +92,7 @@ _agent_thread       = None
 _push_subscriptions = []
 _buy_date_tracker   = {}   # symbol -> datetime.date
 _instrument_cache   = {}   # exchange -> list of instruments (refreshed daily)
+_news_lock          = threading.Lock()   # guards stocks_state news fields
 
 kite = KiteConnect(api_key=ZERODHA_CONFIG["api_key"])
 VAPID_PRIVATE_KEY = PATHS.get("vapid_private_key", "vapid_private.pem")
@@ -339,6 +360,115 @@ def get_signal(candles: list):
     a = analyse(candles)
     return a["signal"], a["ema_green"], a["ema_red"], a["gap_pct"]
 
+# ── Background news fetcher ───────────────────────────────────────────────────
+def _news_worker():
+    """
+    Runs in a daemon thread. Refreshes news sentiment for all watchlist stocks
+    every 30 minutes. News is cached in news.py and only refetched when stale.
+    Runs independently of the trading loop — never blocks trade execution.
+    """
+    log.info("📰 News worker started")
+    while True:
+        for w in WATCHLIST:
+            sym = w["symbol"]
+            try:
+                result = get_news_sentiment(sym, max_age_hours=24)
+                with _news_lock:
+                    ss = stocks_state.get(sym)
+                    if ss:
+                        ss["news_score"]      = result["score"]
+                        ss["news_label"]      = result["label"]
+                        ss["news_summary"]    = result["summary"]
+                        ss["news_headlines"]  = result["headlines"]
+                        ss["news_fetched_at"] = result["fetched_at"]
+            except Exception as e:
+                log.warning(f"📰 {sym} news error: {e}")
+            time.sleep(3)   # small gap between stocks to avoid rate limiting
+        time.sleep(1800)    # refresh every 30 minutes
+
+
+def apply_news_to_conviction(intel: dict, symbol: str) -> dict:
+    """
+    Reads cached news sentiment for symbol and adjusts conviction score.
+    Returns a copy of intel with updated conviction, conviction_label,
+    invest_pct and reason_detail.
+
+    News contributes up to ±20 pts:
+      BULLISH news + BUY/HOLD↑  → +5 to +20 pts (confirms signal)
+      BULLISH news + SELL       → +0 pts (don't add conviction to a sell)
+      BEARISH news + SELL/HOLD↓ → -5 to -20 pts (confirms bearish signal)
+      BEARISH news + BUY        → -5 to -20 pts (news contradicts EMA signal)
+      NEUTRAL / no news         → 0 pts
+    """
+    ss = stocks_state.get(symbol, {})
+    news_label = ss.get("news_label", "NEUTRAL")
+    news_score = ss.get("news_score", 0)
+    news_summary = ss.get("news_summary", "")
+
+    sig = intel.get("signal", "")
+    is_bullish_signal = "BUY" in sig or "↑" in sig
+    is_bearish_signal = "SELL" in sig or "↓" in sig
+
+    delta = 0
+    news_note = ""
+
+    if news_label == "BULLISH":
+        if is_bullish_signal:
+            # News confirms EMA bullish signal — boost conviction
+            delta = ss.get("news_conviction_delta", 0) or (
+                20 if news_score >= 60 else 10 if news_score >= 30 else 5
+            )
+            news_note = f"📰 News BULLISH ({news_score:+d}) confirms signal → +{delta}pt"
+        elif is_bearish_signal:
+            # News is bullish but EMA says sell — reduce conviction of sell
+            delta = -(ss.get("news_conviction_delta", 0) or (
+                10 if news_score >= 60 else 5 if news_score >= 30 else 0
+            ))
+            news_note = f"📰 News BULLISH ({news_score:+d}) conflicts with SELL → {delta}pt"
+    elif news_label == "BEARISH":
+        if is_bearish_signal:
+            # News confirms EMA bearish signal — boost SELL conviction (actually hurts buy)
+            delta = -(ss.get("news_conviction_delta", 0) or (
+                20 if news_score <= -60 else 10 if news_score <= -30 else 5
+            ))
+            news_note = f"📰 News BEARISH ({news_score:+d}) confirms bearish signal → {delta}pt"
+        elif is_bullish_signal:
+            # News is bearish but EMA says buy — reduce conviction
+            delta = -(ss.get("news_conviction_delta", 0) or (
+                15 if news_score <= -60 else 8 if news_score <= -30 else 3
+            ))
+            news_note = f"📰 News BEARISH ({news_score:+d}) conflicts with BUY → {delta}pt"
+
+    if delta == 0:
+        news_note = f"📰 News NEUTRAL — no conviction impact"
+
+    new_score = max(0, min(100, intel["conviction"] + delta))
+
+    # Recalculate label and invest_pct
+    if new_score >= 65:
+        new_label, new_invest = "STRONG", 1.00
+    elif new_score >= 38:
+        new_label, new_invest = "MODERATE", 0.75
+    else:
+        new_label, new_invest = "WEAK", 0.50
+
+    updated = dict(intel)
+    updated["conviction"]       = new_score
+    updated["conviction_label"] = new_label
+    updated["invest_pct"]       = new_invest
+    updated["news_delta"]       = delta
+    updated["news_note"]        = news_note
+    updated["reason_detail"]    = intel["reason_detail"] + f" | {news_note}"
+
+    if delta != 0:
+        log.info(
+            f"📰 {symbol}: news adjusted conviction "
+            f"{intel['conviction']}→{new_score} ({intel['conviction_label']}→{new_label}) | {news_note}"
+        )
+
+    return updated
+
+
 def is_market_open() -> bool:
     now = datetime.datetime.now(IST)
     if now.weekday() >= 5:
@@ -346,6 +476,168 @@ def is_market_open() -> bool:
     o = now.replace(hour=9,  minute=15, second=0, microsecond=0)
     c = now.replace(hour=15, minute=30, second=0, microsecond=0)
     return o <= now <= c
+
+def opening_volatility_status(intel: dict = None) -> dict:
+    """
+    Smart opening volatility guard — protects against false signals at open
+    WITHOUT blocking genuine strong breakouts.
+
+    Problem with a flat time buffer:
+      If SILVERIETF rallies strongly from 9:15 and keeps going, a hard 30-min
+      block means missing the entire move — that is also a loss (opportunity cost).
+
+    Solution — signal-aware early override:
+      During the buffer window, a signal CAN be acted on early if ALL four
+      "strong breakout" criteria are met. Otherwise stay blocked.
+
+    BLOCK (default during buffer):
+      - Candle range is high/whipsawing (chaotic open)
+      - Gap is small or narrowing (weak/fading signal)
+      - Volume is below average (thin, no real participation)
+      - Conviction is WEAK or MODERATE (uncertain signal)
+
+    ALLOW EARLY (override buffer) only if ALL of:
+      1. Conviction is STRONG (score >= 65)
+      2. Gap is widening — trend accelerating, not reversing
+      3. Volume ratio >= 1.5x — real participation confirms the move
+      4. Candle range is NOT excessively wild (not a spike)
+
+    After the buffer, only keeps blocking if candle range is still high.
+
+    Returns:
+      blocked       — True = do not execute orders this tick
+      early_entry   — True = buffer overridden due to strong breakout signal
+      volatile      — True = candle range still wild (post-buffer block)
+      reason        — plain-English explanation for UI
+      candle_range_pct — measured opening candle swing %
+    """
+    cfg  = TRADING_CONFIG
+    now  = datetime.datetime.now(IST)
+    buf  = cfg.get("opening_buffer_minutes", 30)
+    vola = cfg.get("opening_volatility_threshold_pct", 1.5)
+
+    # Thresholds for early-entry override
+    EARLY_MIN_CONVICTION = 65    # must be STRONG
+    EARLY_MIN_VOL_RATIO  = 1.5   # at least 1.5x average volume
+    EARLY_MAX_RANGE_PCT  = 2.0   # candle range must NOT exceed this (not a spike)
+
+    market_open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    buffer_end       = market_open_time + datetime.timedelta(minutes=buf)
+    minutes_left     = max(0, int((buffer_end - now).total_seconds() / 60))
+    in_buffer        = now < buffer_end
+
+    def _get_opening_candle_range():
+        """Fetch first 3 five-min candles of today and return high-low range %."""
+        try:
+            tok = None
+            for w in WATCHLIST[:1]:
+                try:
+                    tok = get_instrument_token(w["symbol"], w["exchange"])
+                    break
+                except Exception:
+                    pass
+            if not tok:
+                return None
+            today_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+            raw = kite.historical_data(tok, today_start, now, "5minute")
+            if not raw or len(raw) < 1:
+                return None
+            first = raw[:3]
+            high  = max(c["high"] for c in first)
+            low   = min(c["low"]  for c in first)
+            open_ = first[0]["open"]
+            return (high - low) / open_ * 100 if open_ else None
+        except Exception as e:
+            log.debug(f"Opening candle range check failed: {e}")
+            return None
+
+    candle_range_pct = _get_opening_candle_range()
+
+    # ── PAST buffer: only block if still genuinely wild ──────────────────────
+    if not in_buffer:
+        still_volatile = (
+            candle_range_pct is not None and candle_range_pct > vola
+        )
+        if still_volatile:
+            return {
+                "blocked": True, "early_entry": False, "volatile": True,
+                "wait_until": (now + datetime.timedelta(minutes=10)).strftime("%I:%M %p"),
+                "minutes_left": 10,
+                "reason": (
+                    f"Opening range {candle_range_pct:.1f}% > {vola}% threshold — "
+                    f"market still choppy, re-checking in 10 min"
+                ),
+                "candle_range_pct": round(candle_range_pct, 2),
+            }
+        return {
+            "blocked": False, "early_entry": False, "volatile": False,
+            "wait_until": None, "minutes_left": 0,
+            "reason": "Opening period clear — normal trading active",
+            "candle_range_pct": round(candle_range_pct, 2) if candle_range_pct else None,
+        }
+
+    # ── INSIDE buffer: check for strong breakout override ────────────────────
+    if intel is not None:
+        conviction   = intel.get("conviction", 0)
+        conv_label   = intel.get("conviction_label", "WEAK")
+        gap_change   = intel.get("gap_change", 0)
+        vol_ratio    = intel.get("vol_ratio", 0)
+        signal       = intel.get("signal", "")
+        is_bullish   = signal in ("BUY",) or (signal.startswith("HOLD") and "↑" in signal)
+
+        candle_ok    = candle_range_pct is None or candle_range_pct <= EARLY_MAX_RANGE_PCT
+
+        if (is_bullish
+                and conviction >= EARLY_MIN_CONVICTION
+                and gap_change > 0
+                and vol_ratio >= EARLY_MIN_VOL_RATIO
+                and candle_ok):
+            # ALL criteria met — override the buffer, let this trade through
+            log.info(
+                f"🚀 Opening early-entry override: conviction={conviction}/100 "
+                f"gap_change=+{gap_change:.3f}% vol={vol_ratio:.1f}x "
+                f"range={f'{candle_range_pct:.1f}%' if candle_range_pct else 'n/a'} "
+                f"— strong breakout, ignoring buffer"
+            )
+            return {
+                "blocked": False, "early_entry": True, "volatile": False,
+                "wait_until": None, "minutes_left": 0,
+                "reason": (
+                    f"🚀 Strong breakout override — conviction {conviction}/100, "
+                    f"gap widening +{gap_change:.3f}%, vol {vol_ratio:.1f}x — "
+                    f"buying despite opening buffer ({minutes_left}min remaining)"
+                ),
+                "candle_range_pct": round(candle_range_pct, 2) if candle_range_pct else None,
+            }
+
+        # Build a specific reason for why early entry was NOT granted
+        reasons = []
+        if not is_bullish:
+            reasons.append("signal not bullish")
+        if conviction < EARLY_MIN_CONVICTION:
+            reasons.append(f"conviction {conviction}/100 < {EARLY_MIN_CONVICTION} needed")
+        if gap_change <= 0:
+            reasons.append(f"gap {'narrowing' if gap_change < 0 else 'flat'} (not accelerating)")
+        if vol_ratio < EARLY_MIN_VOL_RATIO:
+            reasons.append(f"volume {vol_ratio:.1f}x < {EARLY_MIN_VOL_RATIO}x needed")
+        if not candle_ok:
+            reasons.append(f"candle range {candle_range_pct:.1f}% too wide (spike risk)")
+
+        log.info(
+            f"⏸️  In buffer ({minutes_left}min left). Early entry denied: "
+            + "; ".join(reasons)
+        )
+
+    return {
+        "blocked": True, "early_entry": False, "volatile": False,
+        "wait_until": buffer_end.strftime("%I:%M %p"),
+        "minutes_left": minutes_left,
+        "reason": (
+            f"Opening buffer ({minutes_left}min left until {buffer_end.strftime('%I:%M %p')}) — "
+            f"signal monitored, waiting for market to settle"
+        ),
+        "candle_range_pct": round(candle_range_pct, 2) if candle_range_pct else None,
+    }
 
 # ── State recovery ────────────────────────────────────────────────────────────
 def recover_state() -> dict:
@@ -666,6 +958,14 @@ def agent_loop():
         log.warning('  🔴 LIVE TRADING MODE — REAL ORDERS WILL BE PLACED')
         log.warning('=' * 60)
 
+    # ── Start background news fetcher ──────────────────────────────────────────
+    if NEWS_AVAILABLE:
+        news_thread = threading.Thread(target=_news_worker, daemon=True, name="news-worker")
+        news_thread.start()
+        log.info("📰 News sentiment worker started (refreshes every 30min)")
+    else:
+        log.warning("📰 news.py not found — news sentiment disabled")
+
     _first_run = True
 
     while not _stop_flag.is_set():
@@ -679,14 +979,20 @@ def agent_loop():
                     cash = float(kite.margins(segment="equity")["available"]["live_balance"])
                     state["cash"]         = f"₹{cash:.2f}"
                     state["last_checked"] = datetime.datetime.now(IST).strftime("%H:%M:%S")
-                    h_list = kite.holdings()
+                    mc_holdings = kite.holdings()
+                    try:
+                        mc_positions = kite.positions().get("day", [])
+                    except Exception:
+                        mc_positions = []
                     log.info(f"📊 [Market Closed] Cash: ₹{cash:.2f} | Holdings fetched for {len(WATCHLIST)} stocks")
                     for w in WATCHLIST:
                         sym     = w["symbol"]
-                        holding = next((h for h in h_list if h["tradingsymbol"] == sym), None)
-                        qty     = holding["quantity"]      if holding else 0
-                        avg_p   = holding["average_price"] if holding else 0
-                        ltp     = holding["last_price"]    if holding else 0
+                        demat   = next((h for h in mc_holdings  if h["tradingsymbol"] == sym), None)
+                        pos     = next((p for p in mc_positions if p["tradingsymbol"] == sym), None)
+                        qty     = (demat["quantity"] if demat else 0) + (pos["quantity"] if pos else 0)
+                        avg_p   = (demat["average_price"] if demat and demat["quantity"] > 0
+                                   else pos["average_price"] if pos and pos["quantity"] > 0 else 0)
+                        ltp     = demat["last_price"] if demat else 0
                         stocks_state[sym]["signal"]       = "Market Closed"
                         stocks_state[sym]["holdings_qty"] = qty
                         stocks_state[sym]["avg_price"]    = f"₹{avg_p:.2f}" if avg_p else "—"
@@ -711,9 +1017,23 @@ def agent_loop():
             state["last_checked"] = datetime.datetime.now(IST).strftime("%H:%M:%S")
             state["last_error"]   = ""
 
-            # ── Scan all stocks ───────────────────────────────────────────────
-            buy_signals  = []   # stocks with active BUY signal this tick
-            sell_signals = []   # stocks with active SELL signal
+            # ── Fetch holdings + positions once per tick (not per stock) ─────
+            # kite.holdings() = settled demat (T+2). Stocks bought today won't
+            # appear here until settlement. kite.positions() covers today's buys.
+            try:
+                h_list = kite.holdings()
+            except Exception as e:
+                log.warning(f"⚠️  Could not fetch holdings: {e}")
+                h_list = []
+            try:
+                pos_day = kite.positions().get("day", [])
+            except Exception as e:
+                log.warning(f"⚠️  Could not fetch positions: {e}")
+                pos_day = []
+
+            # ── Scan all stocks first (need intel before volatility decision) ─
+            buy_signals  = []
+            sell_signals = []
 
             for w in WATCHLIST:
                 sym   = w["symbol"]
@@ -722,6 +1042,7 @@ def agent_loop():
                 try:
                     df    = get_candles(sym, exch)
                     intel = analyse(df)          # ← full intelligence analysis
+                    intel = apply_news_to_conviction(intel, sym)  # ← news adjustment
                     sig   = intel["signal"]
                     eg    = intel["ema_green"]
                     er    = intel["ema_red"]
@@ -729,10 +1050,7 @@ def agent_loop():
 
                     quote    = kite.quote(f"{exch}:{sym}")
                     price    = float(quote[f"{exch}:{sym}"]["last_price"])
-                    h_list   = kite.holdings()
-                    holding  = next((h for h in h_list if h["tradingsymbol"] == sym), None)
-                    qty_held = holding["quantity"]      if holding else 0
-                    avg_p    = holding["average_price"] if holding else 0
+                    qty_held, avg_p = get_holding(sym)
 
                     log.info(
                         f"📈 {sym} | ₹{price:.2f} | "
@@ -758,6 +1076,10 @@ def agent_loop():
                     ss["holdings_qty"]     = qty_held
                     ss["avg_price"]        = f"₹{avg_p:.2f}" if avg_p else "—"
                     ss["error"]            = ""
+                    # News fields (written by background thread, just copy to response)
+                    # We also store the delta for the why-box
+                    ss["news_delta"]       = intel.get("news_delta", 0)
+                    ss["news_note"]        = intel.get("news_note", "")
 
                     is_catchup = (_first_run and eg > er
                                   and sig.startswith("HOLD") and qty_held == 0)
@@ -795,43 +1117,68 @@ def agent_loop():
                     ss["signal"] = "ERROR"
                     log.error(f"❌ {sym}: {err}")
 
-            # ── Execute sells first (free up cash before buying) ──────────────
-            for s in sell_signals:
-                do_sell(s["symbol"], s["exchange"], s["qty_held"], s["avg_p"],
-                        s["price"], s["eg"], s["er"], s["gap_pct"], cash,
-                        intel=s.get("intel"))
-
-            # ── Refresh cash after sells ──────────────────────────────────────
-            if sell_signals:
-                time.sleep(2)
-                cash = float(kite.margins(segment="equity")["available"]["live_balance"])
-                state["cash"] = f"₹{cash:.2f}"
-
-            # ── Allocate cash across buy signals ──────────────────────────────
+            # ── Opening volatility guard ──────────────────────────────────────
+            # Run AFTER scan so we can pass the strongest buy signal's intel
+            # into the check — strong breakouts can override the buffer.
+            strongest_intel = None
             if buy_signals:
-                alloc = allocate_cash(buy_signals, cash)
-                for s in buy_signals:
-                    sym        = s["symbol"]
-                    cash_alloc = alloc.get(sym, 0)
-                    if cash_alloc <= 0:
-                        log.info(f"⏭️  {sym}: ₹0 allocated (dropped by low-cash fallback), skipping")
-                        continue
-                    # Note: do_buy itself checks if qty*price >= min_trade_amount
-                    do_buy(sym, s["exchange"], cash_alloc, s["price"],
-                           s["eg"], s["er"], s["gap_pct"], s["qty_held"], s["catchup"],
-                           intel=s.get("intel"))
+                strongest_intel = max(
+                    buy_signals, key=lambda x: x.get("conviction", 0)
+                ).get("intel")
 
-            _first_run = False  # only clear AFTER buys executed this tick
+            ov = opening_volatility_status(intel=strongest_intel)
+            state["opening_volatile"]   = ov["blocked"]
+            state["opening_reason"]     = ov["reason"]
+            state["opening_wait_until"] = ov.get("wait_until") or ""
+            state["opening_early"]      = ov.get("early_entry", False)
 
-            if len(buy_signals) > 1:
-                names = [s["symbol"] for s in buy_signals]
-                strat = cfg.get("multi_buy_strategy", "weighted")
-                log.info(f"📊 Multi-buy ({strat}): {names} | alloc={alloc}")
-                send_push(
-                    f"📊 {len(buy_signals)} BUY signals",
-                    f"{', '.join(names)} | strategy: {strat}",
-                    tag="trade"
-                )
+            if ov["blocked"]:
+                # Signal detected but market not safe — show in UI, don't trade
+                detected = [s["symbol"] for s in sell_signals + buy_signals]
+                if detected:
+                    log.info(
+                        f"⏸️  {detected} signal(s) detected but paused — {ov['reason']}"
+                    )
+
+            else:
+                # Safe to trade — either past buffer, or early-entry override granted
+                if ov.get("early_entry"):
+                    log.info(f"🚀 Early-entry override granted — executing signals now")
+
+                # Sells first (frees cash before buying)
+                for s in sell_signals:
+                    do_sell(s["symbol"], s["exchange"], s["qty_held"], s["avg_p"],
+                            s["price"], s["eg"], s["er"], s["gap_pct"], cash,
+                            intel=s.get("intel"))
+
+                if sell_signals:
+                    time.sleep(2)
+                    cash = float(kite.margins(segment="equity")["available"]["live_balance"])
+                    state["cash"] = f"₹{cash:.2f}"
+
+                if buy_signals:
+                    alloc = allocate_cash(buy_signals, cash)
+                    for s in buy_signals:
+                        sym        = s["symbol"]
+                        cash_alloc = alloc.get(sym, 0)
+                        if cash_alloc <= 0:
+                            log.info(f"⏭️  {sym}: ₹0 allocated, skipping")
+                            continue
+                        do_buy(sym, s["exchange"], cash_alloc, s["price"],
+                               s["eg"], s["er"], s["gap_pct"], s["qty_held"], s["catchup"],
+                               intel=s.get("intel"))
+
+                    if len(buy_signals) > 1:
+                        names = [s["symbol"] for s in buy_signals]
+                        strat = cfg.get("multi_buy_strategy", "weighted")
+                        log.info(f"📊 Multi-buy ({strat}): {names} | alloc={alloc}")
+                        send_push(
+                            f"📊 {len(buy_signals)} BUY signals",
+                            f"{', '.join(names)} | strategy: {strat}",
+                            tag="trade"
+                        )
+
+            _first_run = False
 
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
@@ -907,6 +1254,28 @@ def status():
         **{k: v for k, v in state.items() if k != "recovery"},
         "stocks": list(stocks_state.values()),
     })
+
+@app.route("/api/news")
+def api_news():
+    """Return live news sentiment for all watchlist stocks."""
+    result = {}
+    for sym, ss in stocks_state.items():
+        result[sym] = {
+            "score":       ss.get("news_score", 0),
+            "label":       ss.get("news_label", "—"),
+            "summary":     ss.get("news_summary", "—"),
+            "headlines":   ss.get("news_headlines", []),
+            "fetched_at":  ss.get("news_fetched_at", "—"),
+            "delta":       ss.get("news_delta", 0),
+            "note":        ss.get("news_note", ""),
+        }
+    return jsonify(result)
+
+@app.route("/api/news/refresh")
+def api_news_refresh():
+    """Force-clear news cache and trigger re-fetch on next worker cycle."""
+    clear_news_cache()
+    return jsonify({"ok": True, "message": "News cache cleared — will re-fetch within 30s"})
 
 @app.route("/api/transactions")
 def api_transactions():
