@@ -9,6 +9,8 @@ import csv, json, time, logging, datetime, threading, traceback, socket
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import db as _db
+
 from flask import Flask, redirect, request, jsonify, render_template, Response
 from kiteconnect import KiteConnect
 
@@ -98,6 +100,7 @@ _instrument_cache   = {}   # exchange -> list of instruments (refreshed daily)
 _news_lock          = threading.Lock()   # guards stocks_state news fields
 
 kite = KiteConnect(api_key=ZERODHA_CONFIG["api_key"])
+DB_PATH = PATHS.get("db_file", "trader.db")
 VAPID_PRIVATE_KEY = PATHS.get("vapid_private_key", "vapid_private.pem")
 VAPID_PUBLIC_KEY  = PATHS.get("vapid_public_key",  "vapid_public.txt")
 VAPID_CLAIMS      = {"sub": "mailto:agent@zerodha.local"}
@@ -109,15 +112,8 @@ FIELDS = [
     "holdings_after","reason","ema_green","ema_red","holding_days","estimated_tax_note"
 ]
 
-def init_log():
-    p = Path(PATHS["transaction_log"])
-    if not p.exists():
-        with open(p, "w", newline="") as f:
-            csv.DictWriter(f, fieldnames=FIELDS).writeheader()
-
 def write_transaction(data: dict):
-    with open(PATHS["transaction_log"], "a", newline="") as f:
-        csv.DictWriter(f, fieldnames=FIELDS).writerow({k: data.get(k, "") for k in FIELDS})
+    _db.log_transaction(DB_PATH, data)
     action = data.get("action", "")
     sym    = data.get("symbol", "")
     send_push(
@@ -127,12 +123,7 @@ def write_transaction(data: dict):
     )
 
 def read_transactions(limit=50):
-    p = Path(PATHS["transaction_log"])
-    if not p.exists():
-        return []
-    with open(p, newline="") as f:
-        rows = list(csv.DictReader(f))
-    return rows[-limit:][::-1]
+    return _db.read_transactions(DB_PATH, limit)
 
 # ── Push notifications ────────────────────────────────────────────────────────
 def send_push(title: str, body: str, tag: str = "alert", url: str = "/"):
@@ -157,6 +148,52 @@ def send_push(title: str, body: str, tag: str = "alert", url: str = "/"):
         except Exception as e:
             log.warning(f"Push error: {e}")
 
+# ── Holdings bootstrap ────────────────────────────────────────────────────────
+def _fetch_and_sync_holdings():
+    """
+    Fetch live holdings (T+2 demat) + day positions (T+0 buys not yet settled)
+    from Zerodha and immediately update stocks_state.
+
+    Called right after login / token-restore so the UI shows real quantities
+    before the agent loop has even started its first tick.
+    """
+    try:
+        h_list   = kite.holdings()
+    except Exception as e:
+        log.warning(f"Could not fetch holdings at login: {e}")
+        return
+    try:
+        pos_day  = kite.positions().get("day", [])
+    except Exception:
+        pos_day  = []
+
+    for w in WATCHLIST:
+        sym   = w["symbol"]
+        demat = next((h for h in h_list  if h["tradingsymbol"] == sym), None)
+        pos   = next((p for p in pos_day if p["tradingsymbol"] == sym), None)
+        # quantity = T+2 settled; t1_quantity = T+1 pending (bought yesterday)
+        settled = (demat["quantity"]                   if demat else 0)
+        t1      = (demat.get("t1_quantity", 0)         if demat else 0)
+        intra   = (pos["quantity"] if pos and pos["quantity"] > 0 else 0)
+        qty     = settled + t1 + intra
+        avg_p   = (demat["average_price"] if demat and (settled + t1) > 0
+                   else pos["average_price"] if pos and pos["quantity"] > 0 else 0)
+        stocks_state[sym]["holdings_qty"] = qty
+        stocks_state[sym]["avg_price"]    = f"₹{avg_p:.2f}" if avg_p else "—"
+        if qty:
+            log.info(f"📦 {sym}: {qty} shares (settled={settled} t1={t1} intra={intra}) @ ₹{avg_p:.2f} (synced from Zerodha at login)")
+
+    # Also load buy-dates from DB so sell guards work correctly for
+    # holdings that existed before this session.
+    saved = _db.load_buy_dates(DB_PATH)
+    for sym, date_str in saved.items():
+        if sym not in _buy_date_tracker:
+            try:
+                _buy_date_tracker[sym] = datetime.date.fromisoformat(str(date_str))
+            except Exception:
+                pass
+
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 def try_load_saved_token() -> bool:
     p = Path(PATHS["token_file"])
@@ -167,6 +204,7 @@ def try_load_saved_token() -> bool:
             kite.margins(segment="equity")
             ZERODHA_CONFIG["access_token"] = token
             state["logged_in"] = True
+            _fetch_and_sync_holdings()
             return True
         except Exception:
             p.unlink(missing_ok=True)
@@ -693,7 +731,9 @@ def recover_state() -> dict:
         for w in WATCHLIST:
             sym     = w["symbol"]
             holding = next((h for h in h_list if h["tradingsymbol"] == sym), None)
-            actual  = holding["quantity"] if holding else 0
+            # quantity = T+2 settled; t1_quantity = T+1 pending (bought yesterday)
+            actual  = ((holding["quantity"] + holding.get("t1_quantity", 0))
+                       if holding else 0)
             summary["per_stock"][sym]["actual_holdings"] = actual
             logged  = summary["per_stock"][sym]["log_holdings"]
             if logged != actual:
@@ -858,6 +898,7 @@ def do_buy(symbol: str, exchange: str, cash_to_use: float, price: float,
         log.info(f"✅ {tag} {qty}×{symbol} @ ₹{price:.2f} | {oid}")
 
     _buy_date_tracker[symbol] = datetime.date.today()
+    _db.save_buy_dates(DB_PATH, _buy_date_tracker)
     cash = float(kite.margins(segment="equity")["available"]["live_balance"]) if not dry else 0
     write_transaction({
         "timestamp":             datetime.datetime.now(IST).isoformat(),
@@ -950,7 +991,7 @@ def do_sell(symbol: str, exchange: str, qty_held: int, avg_p: float,
 # ── Main agent loop ───────────────────────────────────────────────────────────
 def agent_loop():
     cfg = TRADING_CONFIG
-    init_log()
+    _db.init_db(DB_PATH, PATHS.get("transaction_log"))
     log.info(f"🤖 Agent started — watching {[w['symbol'] for w in WATCHLIST]}")
 
     # Recovery
@@ -1007,8 +1048,11 @@ def agent_loop():
                         sym     = w["symbol"]
                         demat   = next((h for h in mc_holdings  if h["tradingsymbol"] == sym), None)
                         pos     = next((p for p in mc_positions if p["tradingsymbol"] == sym), None)
-                        qty     = (demat["quantity"] if demat else 0) + (pos["quantity"] if pos else 0)
-                        avg_p   = (demat["average_price"] if demat and demat["quantity"] > 0
+                        settled = (demat["quantity"]           if demat else 0)
+                        t1      = (demat.get("t1_quantity", 0)  if demat else 0)
+                        intra   = (pos["quantity"] if pos and pos["quantity"] > 0 else 0)
+                        qty     = settled + t1 + intra
+                        avg_p   = (demat["average_price"] if demat and (settled + t1) > 0
                                    else pos["average_price"] if pos and pos["quantity"] > 0 else 0)
                         ltp     = demat["last_price"] if demat else 0
                         stocks_state[sym]["signal"]       = "Market Closed"
@@ -1048,6 +1092,18 @@ def agent_loop():
             except Exception as e:
                 log.warning(f"⚠️  Could not fetch positions: {e}")
                 pos_day = []
+
+            # ── Holdings lookup helper (closure over h_list + pos_day) ─────────
+            def get_holding(sym):
+                demat   = next((h for h in h_list  if h["tradingsymbol"] == sym), None)
+                pos     = next((p for p in pos_day if p["tradingsymbol"] == sym), None)
+                settled = (demat["quantity"]           if demat else 0)
+                t1      = (demat.get("t1_quantity", 0) if demat else 0)
+                intra   = (pos["quantity"] if pos and pos["quantity"] > 0 else 0)
+                qty     = settled + t1 + intra
+                avg_p   = (demat["average_price"] if demat and (settled + t1) > 0
+                           else pos["average_price"] if pos and pos["quantity"] > 0 else 0)
+                return qty, avg_p
 
             # ── Scan all stocks first (need intel before volatility decision) ─
             buy_signals  = []
@@ -1240,6 +1296,7 @@ def callback():
         ZERODHA_CONFIG["access_token"] = token
         Path(PATHS["token_file"]).write_text(token)
         state["logged_in"] = True
+        _fetch_and_sync_holdings()
         log.info("✅ Login successful")
         send_push("✅ Logged in", "Zerodha session active. You can start the agent.", "login")
         return redirect("/")
@@ -1304,6 +1361,7 @@ def subscribe():
     sub = request.get_json()
     if sub and sub not in _push_subscriptions:
         _push_subscriptions.append(sub)
+        _db.save_push_subscription(DB_PATH, sub)
         state["notifications_enabled"] = True
     return jsonify({"ok": True})
 
@@ -1312,6 +1370,7 @@ def unsubscribe():
     sub = request.get_json()
     if sub in _push_subscriptions:
         _push_subscriptions.remove(sub)
+    _db.remove_push_subscription(DB_PATH, sub.get("endpoint", "") if sub else "")
     if not _push_subscriptions:
         state["notifications_enabled"] = False
     return jsonify({"ok": True})
@@ -1359,6 +1418,27 @@ self.addEventListener('notificationclick',e=>{
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Initialise DB (creates tables, migrates CSV if first boot)
+    _db.init_db(DB_PATH, PATHS.get("transaction_log"))
+
+    # Restore push subscriptions so notifications survive restarts
+    for _sub in _db.load_push_subscriptions(DB_PATH):
+        if _sub not in _push_subscriptions:
+            _push_subscriptions.append(_sub)
+    if _push_subscriptions:
+        state["notifications_enabled"] = True
+        log.info(f"🔔 Restored {len(_push_subscriptions)} push subscription(s) from DB")
+
+    # Restore buy dates so LTCG / min-holding-day logic survives restarts
+    import datetime as _dt
+    for _sym, _ds in _db.load_buy_dates(DB_PATH).items():
+        try:
+            _buy_date_tracker[_sym] = _dt.date.fromisoformat(_ds)
+        except Exception:
+            pass
+    if _buy_date_tracker:
+        log.info(f"📅 Restored buy dates from DB: {_buy_date_tracker}")
+
     threading.Thread(target=schedule_daily_login_reminder, daemon=True).start()
     try:
         local_ip = socket.gethostbyname(socket.gethostname())

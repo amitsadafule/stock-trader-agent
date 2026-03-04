@@ -5,6 +5,8 @@ agent.log
 vapid_public.txt
 vapid_private.pem
 config.py
+trader.db
+trader.db*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
